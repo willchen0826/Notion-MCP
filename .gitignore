@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+.mcp.json
+.tokens/
+token_cache.json
+*.secret
+
+# Local logs
+*.log
