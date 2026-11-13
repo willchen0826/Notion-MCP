@@ -1,17 +1,20 @@
-# Python
-__pycache__/
-.pytest_cache/
-.venv/
-*.pyc
-
-# Credentials and local configuration
+# Local credentials
 .env
 .env.*
 !.env.example
-.mcp.json
+
+# OAuth tokens
 .tokens/
 token_cache.json
-*.secret
 
-# Local logs
-*.log
+# Local MCP configuration
+.mcp.json
+
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+
+# macOS
+.DS_Store

@@ -5,6 +5,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
+import argparse
+import json
+import tempfile
 
 import httpx
 from dotenv import load_dotenv
@@ -12,6 +15,8 @@ from dotenv import load_dotenv
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ENV_PATH = PROJECT_DIR / ".env"
+TOKEN_DIR = PROJECT_DIR / ".tokens"
+TOKEN_PATH = TOKEN_DIR / "notion.json"
 
 
 def load_oauth_config() -> dict[str, str]:
@@ -209,34 +214,327 @@ def receive_authorization_code(
 
     if "code" not in result:
         raise TimeoutError("Authorization timed out. Restart the login flow.")
+    
     return result["code"]
 
-if __name__ == "__main__":
+def validate_tokens(tokens: object) -> dict:
+    """Validate the token structure without exposing credentials."""
+    if not isinstance(tokens, dict):
+        raise ValueError("Token data must be a JSON object.")
+
+    for key in ("access_token", "refresh_token"):
+        value = tokens.get(key)
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Token data is missing a valid {key}.")
+
+    return tokens
+
+
+def save_tokens(tokens: dict) -> None:
+    """Save tokens using a private temporary file and atomic replacement."""
+    validated_tokens = validate_tokens(tokens)
+
+    TOKEN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    TOKEN_DIR.chmod(0o700)
+
+    temp_path: Path | None = None
+
     try:
-        config = load_oauth_config()
-        state = secrets.token_urlsafe(32)
-        authorization_url = build_authorization_url(config, state)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=TOKEN_DIR,
+            prefix=".notion-",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temp_path = Path(file.name)
+            os.fchmod(file.fileno(), 0o600)
 
-        print("PASS: OAuth configuration loaded")
+            json.dump(validated_tokens, file, indent=2)
+            file.write("\n")
 
-        code = receive_authorization_code(authorization_url, state)
-        print("PASS: Authorization code received and state verified")
+            file.flush()
+            os.fsync(file.fileno())
 
-        tokens = exchange_code_for_tokens(config, code)
-        print("in running phase, the tokens is:   ")
-        print("PASS: Access token obtained")
+        os.replace(temp_path, TOKEN_PATH)
 
-        refresh_token = tokens.get("refresh_token")
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
-        if isinstance(refresh_token, str) and refresh_token:
-            print("PASS: Refresh token obtained")
-        else:
-            print("WARNING: No usable refresh token was returned")
+# 这个函数可能返回： - dict：缓存存在且结构检查通过。 - None：没有缓存。
+def load_tokens() -> dict | None:
+    """Load cached tokens without starting browser authorization."""
+    try:
+        with TOKEN_PATH.open("r", encoding="utf-8") as file:
+            tokens = json.load(file)
 
-        print("INFO: Tokens are currently stored in memory only")
-        print("INFO: Token caching and refresh are not implemented yet")
+    except FileNotFoundError:
+        return None
 
-    except (ValueError, RuntimeError, TimeoutError, OSError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RuntimeError(
+            "Token cache is unreadable. Run 'python oauth.py login' "
+            "to authorize again."
+        ) from None
+
+    try:
+        return validate_tokens(tokens)
+
+    except ValueError:
+        raise RuntimeError(
+            "Token cache has an invalid structure. "
+            "Run 'python oauth.py login' to authorize again."
+        ) from None
+
+def error_result(
+    code: str,
+    message: str,
+    retryable: bool,
+    suggested_action: str,
+) -> dict:
+    """Build an actionable error without exposing credentials."""
+    return {
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "suggested_action": suggested_action,
+        }
+    }
+
+def refresh_cached_tokens(config: dict[str, str]) -> dict:
+    """Refresh cached tokens and persist the new token pair."""
+    tokens = load_tokens()
+
+    if tokens is None:
+        return error_result(
+            "AUTH_REQUIRED",
+            "No cached credentials were found.",
+            False,
+            "Run python oauth.py login.",
+        )
+
+    try:
+        response = httpx.post(
+            "https://api.notion.com/v1/oauth/token",
+            auth=httpx.BasicAuth(
+                config["NOTION_CLIENT_ID"],
+                config["NOTION_CLIENT_SECRET"],
+            ),
+            headers={"Accept": "application/json"},
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+            },
+            timeout=20.0,
+            follow_redirects=False,
+        )
+    except httpx.RequestError:
+        return error_result(
+            "REFRESH_NETWORK_ERROR",
+            "The token refresh request could not be completed.",
+            False,
+            "Check connectivity. The refresh outcome may be unknown; "
+            "if credentials no longer work, run python oauth.py login.",
+        )
+
+    if response.status_code != 200:
+        if response.status_code == 429 or response.status_code >= 500:
+            return error_result(
+                "REFRESH_UNAVAILABLE",
+                f"Token refresh returned HTTP {response.status_code}.",
+                True,
+                "Wait before retrying. Respect Retry-After if provided.",
+            )
+
+        return error_result(
+            "REFRESH_REJECTED",
+            f"Token refresh returned HTTP {response.status_code}.",
+            False,
+            "Check the app credentials, then run python oauth.py login.",
+        )
+
+    try:
+        new_tokens = validate_tokens(response.json())
+    except ValueError:
+        return error_result(
+            "INVALID_REFRESH_RESPONSE",
+            "Notion did not return a valid token pair.",
+            False,
+            "Run python oauth.py login to obtain fresh credentials.",
+        )
+
+    try:
+        save_tokens(new_tokens)
+    except OSError:
+        return error_result(
+            "TOKEN_SAVE_FAILED",
+            "New credentials were received but could not be saved.",
+            False,
+            "Fix cache directory permissions or disk space, "
+            "then run python oauth.py login.",
+        )
+
+    return {"ok": True}
+
+
+def verify_api_access(config: dict[str, str]) -> dict:
+    """Check API access and refresh once if Notion returns HTTP 401."""
+    refreshed = False
+
+    for attempt in range(2):
+        tokens = load_tokens()
+
+        if tokens is None:
+            return error_result(
+                "AUTH_REQUIRED",
+                "No cached credentials were found.",
+                False,
+                "Run python oauth.py login.",
+            )
+
+        try:
+            response = httpx.post(
+                "https://api.notion.com/v1/search",
+                headers={
+                    "Authorization": f"Bearer {tokens['access_token']}",
+                    "Notion-Version": "2026-03-11",
+                },
+                json={"page_size": 1},
+                timeout=20.0,
+                follow_redirects=False,
+            )
+        except httpx.RequestError:
+            return error_result(
+                "API_NETWORK_ERROR",
+                "The read-only API request could not be completed.",
+                True,
+                "Check connectivity and retry.",
+            )
+
+        if response.status_code == 401:
+            if attempt == 1:
+                return error_result(
+                    "AUTH_REQUIRED",
+                    "Notion rejected the refreshed access token.",
+                    False,
+                    "Run python oauth.py login.",
+                )
+
+            refresh_result = refresh_cached_tokens(config)
+
+            if "error" in refresh_result:
+                return refresh_result
+
+            refreshed = True
+            continue
+
+        if response.status_code != 200:
+            retryable = (
+                response.status_code == 429
+                or response.status_code >= 500
+            )
+            return error_result(
+                "API_REQUEST_FAILED",
+                f"Notion returned HTTP {response.status_code}.",
+                retryable,
+                "Wait before retrying if rate limited or unavailable; "
+                "otherwise check request parameters and capabilities.",
+            )
+
+        try:
+            data = response.json()
+        except ValueError:
+            return error_result(
+                "INVALID_API_RESPONSE",
+                "Notion returned invalid JSON.",
+                True,
+                "Retry the read-only request later.",
+            )
+
+        if not isinstance(data, dict) or not isinstance(
+            data.get("results"), list
+        ):
+            return error_result(
+                "INVALID_API_RESPONSE",
+                "Notion returned an unexpected search response.",
+                False,
+                "Check the API response contract.",
+            )
+
+        return {
+            "ok": True,
+            "refreshed": refreshed,
+            "result_count": len(data["results"]),
+        }
+
+    raise RuntimeError("Unexpected end of API verification.")
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Manage local Notion OAuth credentials."
+    )
+    parser.add_argument(
+        "command",
+        choices=("login", "status", "verify", "refresh"),
+        help="Authorize with Notion or inspect the local token cache.",
+    )
+    args = parser.parse_args()
+
+    try:
+        if args.command == "login":
+            config = load_oauth_config()
+            state = secrets.token_urlsafe(32)
+            authorization_url = build_authorization_url(config, state)
+
+            print("PASS: OAuth configuration loaded")
+
+            code = receive_authorization_code(
+                authorization_url,
+                state,
+            )
+            print("PASS: Authorization code received and state verified")
+
+            tokens = exchange_code_for_tokens(config, code)
+            save_tokens(tokens)
+
+            print("PASS: Access token and refresh token obtained")
+            print("PASS: OAuth tokens saved")
+            print("INFO: API access and token refresh are not verified yet")
+
+        elif args.command == "status":
+            tokens = load_tokens()
+
+            if tokens is None:
+                print("INFO: No token cache found")
+                print("ACTION: Run 'python oauth.py login'")
+                raise SystemExit(1)
+
+            print("PASS: Token cache loaded")
+            print("PASS: Access token is present")
+            print("PASS: Refresh token is present")
+            print("INFO: No browser authorization was started")
+            print("INFO: Token validity has not been checked with Notion")
+            
+        elif args.command in ("verify", "refresh"):
+            config = load_oauth_config()
+
+            if args.command == "refresh":
+                result = refresh_cached_tokens(config)
+            else:
+                result = verify_api_access(config)
+
+            print(json.dumps(result, indent=2))
+
+            if "error" in result:
+                raise SystemExit(1)
+
+    except (ValueError, RuntimeError, OSError) as exc:
         print(f"ERROR: {exc}")
         raise SystemExit(1)
 
