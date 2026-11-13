@@ -79,6 +79,10 @@ class NotionAPIClient:
             access_token = credentials["tokens"]["access_token"]
 
             try:
+                # print("DEBUG: HTTP method:", method)
+                # print("DEBUG: HTTP URL:", url)
+                # print("DEBUG: HTTP JSON body:", json_body)
+                
                 response = httpx.request(
                     method=method,
                     url=url,
@@ -139,6 +143,9 @@ class NotionAPIClient:
 
             try:
                 data = response.json()
+                # if path == "/search":
+                    # print("DEBUG: Raw search response:", data)
+    
             except ValueError:
                 return oauth.error_result(
                     "INVALID_API_RESPONSE",
@@ -226,3 +233,136 @@ class NotionAPIClient:
             False,
             "Check the request parameters and API documentation.",
         )
+        
+    def _extract_page_title(self, page: dict[str, Any]) -> str:
+        """Extract a page title from its title-type property."""
+        properties = page["properties"]
+
+        for property_value in properties.values():
+            if property_value.get("type") == "title":
+                parts = property_value["title"]
+                title = "".join(part["plain_text"] for part in parts)
+                return title.strip() or "Untitled"
+
+        return "Untitled"
+
+    def search_pages(
+        self,
+        query: str,
+        page_size: int = 10,
+        start_cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Search accessible pages using Notion's title search.
+
+        Return one batch of page IDs, titles, and URLs.
+        This client does not enforce exact substring matching.
+        Inspect returned titles before selecting a page ID.
+
+        Use a returned page ID to retrieve the page content.
+        If has_more is true, call again with the same query and
+        the returned next_cursor as start_cursor.
+        """
+        if not isinstance(query, str) or not query.strip():
+            return oauth.error_result(
+                "INVALID_QUERY",
+                "The search query must be a non-empty string.",
+                False,
+                "Provide a page title or part of a page title.",
+            )
+
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            return oauth.error_result(
+                "INVALID_PAGE_SIZE",
+                "page_size must be an integer between 1 and 100.",
+                False,
+                "Use a page_size such as 10.",
+            )
+
+        if start_cursor is not None:
+            if not isinstance(start_cursor, str) or not start_cursor.strip():
+                return oauth.error_result(
+                    "INVALID_CURSOR",
+                    "start_cursor must be a non-empty string or None.",
+                    False,
+                    "Use next_cursor from a previous search response.",
+                )
+
+        body: dict[str, Any] = {
+            "query": query.strip(),
+            "page_size": page_size,
+            "filter": {
+                "property": "object",
+                "value": "page",
+            },
+        }
+
+        if start_cursor is not None:
+            body["start_cursor"] = start_cursor
+
+        # print("DEBUG: Search request body:", body)
+        
+        response = self.request(
+            "POST",
+            "/search",
+            json_body=body,
+            read_only=True,
+        )
+
+        if "error" in response:
+            return response
+
+        data = response["data"]
+
+        try:
+            results = data["results"]
+            has_more = data["has_more"]
+            next_cursor = data["next_cursor"]
+
+            if not isinstance(results, list):
+                raise ValueError("Invalid results")
+
+            if not isinstance(has_more, bool):
+                raise ValueError("Invalid has_more")
+
+            if next_cursor is not None and (
+                not isinstance(next_cursor, str) or not next_cursor
+            ):
+                raise ValueError("Invalid next_cursor")
+
+            if has_more and next_cursor is None:
+                raise ValueError("Missing next_cursor")
+
+            pages = []
+
+            for page in results:
+                if page["object"] != "page":
+                    raise ValueError("Unexpected object type")
+
+                if not isinstance(page["id"], str) or not page["id"]:
+                    raise ValueError("Invalid page ID")
+
+                if not isinstance(page["url"], str) or not page["url"]:
+                    raise ValueError("Invalid page URL")
+
+                pages.append(
+                    {
+                        "id": page["id"],
+                        "title": self._extract_page_title(page),
+                        "url": page["url"],
+                    }
+                )
+
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return oauth.error_result(
+                "INVALID_SEARCH_RESPONSE",
+                "Notion returned an unexpected search response structure.",
+                False,
+                "Check the search response format and API version.",
+            )
+
+        return {
+            "ok": True,
+            "pages": pages,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        }
