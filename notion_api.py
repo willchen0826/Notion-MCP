@@ -281,8 +281,8 @@ class NotionAPIClient:
             f"/pages/{page_id}",
             read_only=True,
         )
-        print("get_page function response:  ")
-        print(response)
+        # print("get_page function response:  ")
+        # print(response)
         if "error" in response:
             return response
 
@@ -315,6 +315,131 @@ class NotionAPIClient:
                 "title": title,
                 "url": data["url"],
             },
+        }
+
+    def get_block_children(
+        self,
+        block_id: str,
+        page_size: int = 100,
+        start_cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve one batch of a block's direct children.
+
+        Returns only one level of children; it does not paginate or
+        recurse. If has_more is true, call again with the same
+        block_id and the returned next_cursor as start_cursor. For
+        any returned block with has_children True, call this method
+        again using that block's id to read its own children.
+        """
+        if not isinstance(block_id, str):
+            return oauth.error_result(
+                "INVALID_BLOCK_ID",
+                "block_id must be a string.",
+                False,
+                "Use an id returned by search_pages() or a prior "
+                "get_block_children() result.",
+            )
+
+        block_id = block_id.strip()
+
+        if not PAGE_ID_PATTERN.match(block_id):
+            return oauth.error_result(
+                "INVALID_BLOCK_ID",
+                "block_id must be a Notion block ID (a UUID, with or "
+                "without dashes).",
+                False,
+                "Use an id returned by search_pages() or a prior "
+                "get_block_children() result.",
+            )
+
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            return oauth.error_result(
+                "INVALID_PAGE_SIZE",
+                "page_size must be an integer between 1 and 100.",
+                False,
+                "Use a page_size such as 100.",
+            )
+
+        if start_cursor is not None:
+            if not isinstance(start_cursor, str) or not start_cursor.strip():
+                return oauth.error_result(
+                    "INVALID_CURSOR",
+                    "start_cursor must be a non-empty string or None.",
+                    False,
+                    "Use next_cursor from a previous "
+                    "get_block_children() response.",
+                )
+
+        params: dict[str, Any] = {"page_size": page_size}
+
+        if start_cursor is not None:
+            params["start_cursor"] = start_cursor
+
+        response = self.request(
+            "GET",
+            f"/blocks/{block_id}/children",
+            params=params,
+            read_only=True,
+        )
+
+        if "error" in response:
+            return response
+
+        data = response["data"]
+
+        try:
+            if data["object"] != "list":
+                raise ValueError("Unexpected object type")
+
+            results = data["results"]
+            has_more = data["has_more"]
+            next_cursor = data["next_cursor"]
+
+            if not isinstance(results, list):
+                raise ValueError("Invalid results")
+
+            if not isinstance(has_more, bool):
+                raise ValueError("Invalid has_more")
+
+            if next_cursor is not None and (
+                not isinstance(next_cursor, str) or not next_cursor
+            ):
+                raise ValueError("Invalid next_cursor")
+
+            if has_more and next_cursor is None:
+                raise ValueError("Missing next_cursor")
+
+            for block in results:
+                if not isinstance(block, dict):
+                    raise ValueError("Invalid block")
+
+                if block["object"] != "block":
+                    raise ValueError("Unexpected object type")
+
+                if not isinstance(block["id"], str) or not block["id"]:
+                    raise ValueError("Invalid block ID")
+
+                if not isinstance(block["type"], str) or not block["type"]:
+                    raise ValueError("Invalid block type")
+
+                if not isinstance(block["has_children"], bool):
+                    raise ValueError("Invalid has_children")
+
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return oauth.error_result(
+                "INVALID_BLOCK_CHILDREN_RESPONSE",
+                "Notion returned an unexpected block children "
+                "response structure.",
+                False,
+                "Check the block children response format and API "
+                "version.",
+            )
+
+        return {
+            "ok": True,
+            "results": results,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
         }
 
     def search_pages(
