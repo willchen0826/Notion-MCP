@@ -8,6 +8,11 @@ import oauth
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2026-03-11"
 
+PAGE_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?"
+    r"[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
+)
+
 
 
 class NotionAPIClient:
@@ -245,6 +250,72 @@ class NotionAPIClient:
                 return title.strip() or "Untitled"
 
         return "Untitled"
+
+    def get_page(self, page_id: str) -> dict[str, Any]:
+        """Retrieve page metadata only (no block content).
+
+        page_id should come from search_pages() or get_page_content().
+        Use get_page_content() to read the page's body text.
+        """
+        if not isinstance(page_id, str):
+            return oauth.error_result(
+                "INVALID_PAGE_ID",
+                "page_id must be a string.",
+                False,
+                "Use an id returned by search_pages().",
+            )
+
+        page_id = page_id.strip()
+
+        if not PAGE_ID_PATTERN.match(page_id):
+            return oauth.error_result(
+                "INVALID_PAGE_ID",
+                "page_id must be a Notion page ID (a UUID, with or "
+                "without dashes).",
+                False,
+                "Use an id returned by search_pages().",
+            )
+
+        response = self.request(
+            "GET",
+            f"/pages/{page_id}",
+            read_only=True,
+        )
+        print("get_page function response:  ")
+        print(response)
+        if "error" in response:
+            return response
+
+        data = response["data"]
+
+        try:
+            if data["object"] != "page":
+                raise ValueError("Unexpected object type")
+
+            if not isinstance(data["id"], str) or not data["id"]:
+                raise ValueError("Invalid page ID")
+
+            if not isinstance(data["url"], str) or not data["url"]:
+                raise ValueError("Invalid page URL")
+
+            title = self._extract_page_title(data)
+
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return oauth.error_result(
+                "INVALID_PAGE_RESPONSE",
+                "Notion returned an unexpected page response structure.",
+                False,
+                "Check the page response format and API version.",
+            )
+
+        return {
+            "ok": True,
+            "page": {
+                "id": data["id"],
+                "title": title,
+                "url": data["url"],
+            },
+        }
 
     def search_pages(
         self,
