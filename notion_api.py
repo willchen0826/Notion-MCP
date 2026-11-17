@@ -442,6 +442,243 @@ class NotionAPIClient:
             "next_cursor": next_cursor,
         }
 
+    def _walk_block_tree(
+        self,
+        page_id: str,
+        *,
+        max_depth: int = 3,
+        max_request_calls: int = 20,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        """Traverse a page's block tree with bounded depth and requests.
+
+        Internal helper for the future get_page_content(); no MCP tool
+        uses this yet. Performs a depth-first, preorder walk: a block
+        is recorded, then its children (if any, and within
+        max_depth), then its next sibling. Pagination for each parent
+        (the page itself, or any block with has_children) is tracked
+        independently of every other parent.
+
+        Reuses get_block_children() only; it never sends an HTTP or
+        OAuth request directly, and never opens a browser (refresh,
+        if needed, happens inside get_block_children()/request()).
+        A failed request (authentication, rate limiting, or anything
+        else) stops the entire traversal rather than continuing with
+        partial siblings elsewhere.
+
+        complete=True means every block reachable within max_depth
+        and max_request_calls was recorded, with no cursor cycles and
+        no unreported child_page/child_database boundary. It does not
+        certify that a later text-extraction phase will represent
+        every block's content; that is Phase 2.3.4's concern.
+        """
+        if not isinstance(page_id, str):
+            return oauth.error_result(
+                "INVALID_PAGE_ID",
+                "page_id must be a string.",
+                False,
+                "Use an id returned by search_pages().",
+            )
+
+        page_id = page_id.strip()
+
+        if not PAGE_ID_PATTERN.match(page_id):
+            return oauth.error_result(
+                "INVALID_PAGE_ID",
+                "page_id must be a Notion page ID (a UUID, with or "
+                "without dashes).",
+                False,
+                "Use an id returned by search_pages().",
+            )
+
+        if type(max_depth) is not int or not 0 <= max_depth <= 10:
+            return oauth.error_result(
+                "INVALID_MAX_DEPTH",
+                "max_depth must be an integer between 0 and 10.",
+                False,
+                "Use a max_depth such as 3.",
+            )
+
+        if (
+            type(max_request_calls) is not int
+            or not 1 <= max_request_calls <= 100
+        ):
+            return oauth.error_result(
+                "INVALID_MAX_REQUEST_CALLS",
+                "max_request_calls must be an integer between 1 and "
+                "100.",
+                False,
+                "Use a max_request_calls such as 20.",
+            )
+
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            return oauth.error_result(
+                "INVALID_PAGE_SIZE",
+                "page_size must be an integer between 1 and 100.",
+                False,
+                "Use a page_size such as 100.",
+            )
+
+        state: dict[str, Any] = {
+            "blocks": [],
+            "request_calls": 0,
+            "partial": {
+                "max_depth_reached": False,
+                "max_requests_reached": False,
+            },
+            "warnings": [],
+            "stopped": False,
+        }
+
+        root_error = self._walk_children(
+            page_id,
+            0,
+            state,
+            max_depth=max_depth,
+            max_request_calls=max_request_calls,
+            page_size=page_size,
+        )
+
+        if root_error is not None:
+            return root_error
+
+        complete = (
+            not state["warnings"]
+            and not state["partial"]["max_depth_reached"]
+            and not state["partial"]["max_requests_reached"]
+        )
+
+        return {
+            "ok": True,
+            "complete": complete,
+            "blocks": state["blocks"],
+            "request_calls": state["request_calls"],
+            "partial": state["partial"],
+            "warnings": state["warnings"],
+        }
+
+    def _walk_children(
+        self,
+        parent_id: str,
+        depth: int,
+        state: dict[str, Any],
+        *,
+        max_depth: int,
+        max_request_calls: int,
+        page_size: int,
+    ) -> dict[str, Any] | None:
+        """Fetch and record one parent's children, recursing as needed.
+
+        Returns a structured error only when the very first
+        get_block_children() call of the whole traversal fails; every
+        later failure is instead recorded as a warning in state, and
+        state["stopped"] is set so no further calls are made anywhere
+        in the traversal.
+        """
+        start_cursor: str | None = None
+        used_cursors: set[str] = set()
+
+        while True:
+            if state["stopped"]:
+                return None
+
+            if start_cursor is not None:
+                if start_cursor in used_cursors:
+                    state["warnings"].append(
+                        {
+                            "type": "repeated_cursor",
+                            "parent_id": parent_id,
+                            "cursor": start_cursor,
+                        }
+                    )
+                    return None
+
+                used_cursors.add(start_cursor)
+
+            if state["request_calls"] >= max_request_calls:
+                state["partial"]["max_requests_reached"] = True
+                state["stopped"] = True
+                return None
+
+            response = self.get_block_children(
+                parent_id,
+                page_size=page_size,
+                start_cursor=start_cursor,
+            )
+            state["request_calls"] += 1
+
+            if "error" in response:
+                if state["request_calls"] == 1:
+                    state["stopped"] = True
+                    return response
+
+                error = response["error"]
+                state["warnings"].append(
+                    {
+                        "type": "request_failed",
+                        "parent_id": parent_id,
+                        "code": error.get("code"),
+                        "message": error.get("message"),
+                        "retryable": error.get("retryable"),
+                    }
+                )
+                state["stopped"] = True
+                return None
+
+            results = response["results"]
+            has_more = response["has_more"]
+            next_cursor = response["next_cursor"]
+
+            for block in results:
+                state["blocks"].append(
+                    {
+                        "parent_id": parent_id,
+                        "depth": depth,
+                        "block": block,
+                    }
+                )
+
+                block_type = block["type"]
+                has_children = block["has_children"]
+
+                if block_type in ("child_page", "child_database"):
+                    if has_children:
+                        state["warnings"].append(
+                            {
+                                "type": "page_boundary",
+                                "block_id": block["id"],
+                                "block_type": block_type,
+                            }
+                        )
+                    continue
+
+                if not has_children:
+                    continue
+
+                if depth >= max_depth:
+                    state["partial"]["max_depth_reached"] = True
+                    continue
+
+                self._walk_children(
+                    block["id"],
+                    depth + 1,
+                    state,
+                    max_depth=max_depth,
+                    max_request_calls=max_request_calls,
+                    page_size=page_size,
+                )
+
+                if state["stopped"]:
+                    return None
+
+            if state["stopped"]:
+                return None
+
+            if not has_more:
+                return None
+
+            start_cursor = next_cursor
+
     def search_pages(
         self,
         query: str,
