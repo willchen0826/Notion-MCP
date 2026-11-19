@@ -395,6 +395,8 @@ def test_later_request_failure_preserves_partial_results():
             "code": "RATE_LIMITED",
             "message": "Notion rate-limited the request.",
             "retryable": True,
+            "suggested_action": "See the error code.",
+            "retry_after": None,
         }
     ]
     assert result["request_calls"] == 2

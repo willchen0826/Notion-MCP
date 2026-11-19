@@ -1,5 +1,5 @@
 import re
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -12,6 +12,28 @@ PAGE_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?"
     r"[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
 )
+
+# Block types whose text lives at block[type]["rich_text"].
+RICH_TEXT_BLOCK_TYPES = frozenset(
+    {
+        "paragraph",
+        "heading_1",
+        "heading_2",
+        "heading_3",
+        "heading_4",
+        "bulleted_list_item",
+        "numbered_list_item",
+        "toggle",
+        "quote",
+        "callout",
+        "code",
+    }
+)
+
+# Containers with no text of their own; their descendants are what
+# carry text, so they are supported with an empty string, not
+# reported as unsupported.
+STRUCTURAL_CONTAINER_TYPES = frozenset({"table", "column_list", "column"})
 
 
 
@@ -449,6 +471,9 @@ class NotionAPIClient:
         max_depth: int = 3,
         max_request_calls: int = 20,
         page_size: int = 100,
+        on_block: (
+            Callable[[dict[str, Any], dict[str, Any]], None] | None
+        ) = None,
     ) -> dict[str, Any]:
         """Traverse a page's block tree with bounded depth and requests.
 
@@ -471,6 +496,14 @@ class NotionAPIClient:
         no unreported child_page/child_database boundary. It does not
         certify that a later text-extraction phase will represent
         every block's content; that is Phase 2.3.4's concern.
+
+        on_block, if given, is called as on_block(entry, state) right
+        after each raw block entry is appended to state["blocks"].
+        It may set state["stopped"] = True to halt the traversal
+        immediately (no further get_block_children() calls anywhere),
+        which is how read_page_blocks() enforces its own output
+        limits without fetching the whole tree first and trimming it
+        afterward.
         """
         if not isinstance(page_id, str):
             return oauth.error_result(
@@ -537,6 +570,7 @@ class NotionAPIClient:
             max_depth=max_depth,
             max_request_calls=max_request_calls,
             page_size=page_size,
+            on_block=on_block,
         )
 
         if root_error is not None:
@@ -566,6 +600,9 @@ class NotionAPIClient:
         max_depth: int,
         max_request_calls: int,
         page_size: int,
+        on_block: (
+            Callable[[dict[str, Any], dict[str, Any]], None] | None
+        ) = None,
     ) -> dict[str, Any] | None:
         """Fetch and record one parent's children, recursing as needed.
 
@@ -605,6 +642,12 @@ class NotionAPIClient:
                 page_size=page_size,
                 start_cursor=start_cursor,
             )
+            # response (get_block_children) is like {
+            #     "ok": True,
+            #     "results": [...],
+            #     "has_more": ...,
+            #     "next_cursor": ...,
+            # }
             state["request_calls"] += 1
 
             if "error" in response:
@@ -620,6 +663,8 @@ class NotionAPIClient:
                         "code": error.get("code"),
                         "message": error.get("message"),
                         "retryable": error.get("retryable"),
+                        "suggested_action": error.get("suggested_action"),
+                        "retry_after": error.get("retry_after"),
                     }
                 )
                 state["stopped"] = True
@@ -630,6 +675,9 @@ class NotionAPIClient:
             next_cursor = response["next_cursor"]
 
             for block in results:
+                if state["stopped"]:
+                    return None
+
                 state["blocks"].append(
                     {
                         "parent_id": parent_id,
@@ -637,6 +685,12 @@ class NotionAPIClient:
                         "block": block,
                     }
                 )
+
+                if on_block is not None:
+                    on_block(state["blocks"][-1], state)
+
+                    if state["stopped"]:
+                        return None
 
                 block_type = block["type"]
                 has_children = block["has_children"]
@@ -666,6 +720,7 @@ class NotionAPIClient:
                     max_depth=max_depth,
                     max_request_calls=max_request_calls,
                     page_size=page_size,
+                    on_block=on_block,
                 )
 
                 if state["stopped"]:
@@ -678,6 +733,198 @@ class NotionAPIClient:
                 return None
 
             start_cursor = next_cursor
+
+    def _extract_rich_text(self, rich_text: Any) -> str:
+        """Join plain_text fragments from a Notion rich_text array.
+
+        Fragments are concatenated directly with no added separator,
+        since Notion splits rich text only at formatting boundaries,
+        not at word boundaries.
+        """
+        return "".join(fragment["plain_text"] for fragment in rich_text)
+
+    def _extract_block_text(self, block: dict[str, Any]) -> str | None:
+        """Return a block's readable text, or None if unsupported.
+
+        "" is a valid result for a supported block with no text of
+        its own (a structural container such as table/column_list/
+        column) or with empty rich_text (an empty paragraph, for
+        example). Neither case is "unsupported" -- that is reported
+        separately through unsupported_block_types. Any malformed
+        type-specific data (an unexpected shape for this block's own
+        type) is also treated as unsupported rather than raised,
+        matching this project's general response-validation style.
+        """
+        block_type = block["type"]
+
+        try:
+            if block_type in STRUCTURAL_CONTAINER_TYPES:
+                return ""
+
+            if block_type in ("child_page", "child_database"):
+                return block[block_type].get("title", "")
+
+            if block_type == "table_row":
+                cells = block["table_row"]["cells"]
+                return " | ".join(
+                    self._extract_rich_text(cell) for cell in cells
+                )
+
+            if block_type == "to_do":
+                to_do = block["to_do"]
+                marker = "[x] " if to_do["checked"] else "[ ] "
+                return marker + self._extract_rich_text(
+                    to_do["rich_text"]
+                )
+
+            if block_type in RICH_TEXT_BLOCK_TYPES:
+                return self._extract_rich_text(
+                    block[block_type]["rich_text"]
+                )
+
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+        return None
+
+    def read_page_blocks(
+        self,
+        page_id: str,
+        *,
+        max_depth: int = 3,
+        max_request_calls: int = 20,
+        max_blocks: int = 500,
+        max_characters: int = 20000,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        """Read a page's content as compact, readable text entries.
+
+        Builds on _walk_block_tree()'s traversal (the same
+        pagination, recursion, depth bound, and request-call bound)
+        and adds two more output bounds on top: max_blocks (how many
+        visited blocks are kept in the output) and max_characters
+        (the total length of all emitted text, including separators
+        the extractor itself adds, such as " | " between table cells
+        or the "[x] "/"[ ] " marker on a to-do). Both are enforced
+        while the raw traversal is still running, through the
+        on_block callback: hitting either stops the traversal
+        immediately, the same way hitting max_depth or
+        max_request_calls does, so the full raw tree is never fetched
+        and trimmed afterward. A block that would push the output
+        over either limit is left out entirely rather than having
+        its text cut short.
+
+        request_calls counts get_block_children() calls, not the
+        individual HTTP attempts request() may make internally (an
+        initial 401 followed by one refreshed retry still counts as
+        one get_block_children() call here).
+
+        complete=True means every visited block was both traversed
+        (per _walk_block_tree's own meaning: no depth/request-call
+        limit hit, no cursor cycle, no unreported page/database
+        boundary) and successfully turned into text within
+        max_blocks and max_characters, with no unsupported block
+        types along the way. A page can be complete at the
+        traversal level but still have complete=False here, for
+        example because one block type had no text extractor.
+        """
+        if type(max_blocks) is not int or max_blocks < 1:
+            return oauth.error_result(
+                "INVALID_MAX_BLOCKS",
+                "max_blocks must be a positive integer.",
+                False,
+                "Use a max_blocks such as 500.",
+            )
+
+        if type(max_characters) is not int or max_characters < 1:
+            return oauth.error_result(
+                "INVALID_MAX_CHARACTERS",
+                "max_characters must be a positive integer.",
+                False,
+                "Use a max_characters such as 20000.",
+            )
+
+        reader_state: dict[str, Any] = {
+            "blocks": [],
+            "char_total": 0,
+            "unsupported_types": set(),
+            "partial": {
+                "max_blocks_reached": False,
+                "max_characters_reached": False,
+            },
+        }
+
+        def on_block(
+            entry: dict[str, Any], state: dict[str, Any]
+        ) -> None:
+            if len(reader_state["blocks"]) >= max_blocks:
+                reader_state["partial"]["max_blocks_reached"] = True
+                state["stopped"] = True
+                return
+
+            block = entry["block"]
+            text = self._extract_block_text(block)
+
+            if text is None:
+                reader_state["unsupported_types"].add(block["type"])
+                text_length = 0
+            else:
+                text_length = len(text)
+
+            if (
+                reader_state["char_total"] + text_length
+                > max_characters
+            ):
+                reader_state["partial"]["max_characters_reached"] = (
+                    True
+                )
+                state["stopped"] = True
+                return
+
+            reader_state["char_total"] += text_length
+
+            reader_state["blocks"].append(
+                {
+                    "id": block["id"],
+                    "parent_id": entry["parent_id"],
+                    "type": block["type"],
+                    "depth": entry["depth"],
+                    "text": text,
+                }
+            )
+
+        walk_result = self._walk_block_tree(
+            page_id,
+            max_depth=max_depth,
+            max_request_calls=max_request_calls,
+            page_size=page_size,
+            on_block=on_block,
+        )
+
+        if "error" in walk_result:
+            return walk_result
+
+        complete = (
+            walk_result["complete"]
+            and not reader_state["partial"]["max_blocks_reached"]
+            and not reader_state["partial"]["max_characters_reached"]
+            and not reader_state["unsupported_types"]
+        )
+
+        partial = dict(walk_result["partial"])
+        partial.update(reader_state["partial"])
+
+        return {
+            "ok": True,
+            "complete": complete,
+            "blocks": reader_state["blocks"],
+            "request_calls": walk_result["request_calls"],
+            "partial": partial,
+            "warnings": walk_result["warnings"],
+            "unsupported_block_types": sorted(
+                reader_state["unsupported_types"]
+            ),
+        }
 
     def search_pages(
         self,
