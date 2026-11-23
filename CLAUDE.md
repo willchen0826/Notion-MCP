@@ -44,11 +44,17 @@ on the user's behalf.
     `read_page_blocks()` into one result (page metadata + body text +
     read status); short-circuits on a metadata error.
   - `create_page(parent_page_id, title, content, *, dry_run=True)`:
-    Phase 2.4.1, local-only so far. With `dry_run=True` (the default),
-    validates inputs and returns a preview (`parent_page_id`, `title`,
-    `content`) with zero calls to `request()`. With `dry_run=False`,
-    returns a structured `PAGE_CREATION_NOT_IMPLEMENTED` error — live
-    creation is Phase 2.4.2.
+    Phase 2.4.1 + 2.4.2, mocked only so far (no live Notion write has
+    been made). With `dry_run=True` (the default), validates inputs —
+    including Notion's size limits — and returns a preview
+    (`parent_page_id`, `title`, `content`) with zero calls to
+    `request()`. With `dry_run=False`, builds a page-create payload
+    (one `paragraph` block per line of `content`, text chunked to
+    Notion's 2000-character rich-text limit instead of truncated) and
+    calls `request()` once (`POST /pages`); returns the new page's
+    `id`/`title`/`url` on success, passes request-layer errors through
+    unchanged, and returns a distinct error for a malformed success
+    response. Live creation against the real workspace is Phase 2.4.3.
 - `check_notion_api.py`, `check_search_pages.py`, `check_get_page.py`,
   `check_get_block_children.py`, `check_block_tree.py`,
   `check_read_page_blocks.py`, `check_get_page_content.py` — manual
@@ -71,7 +77,9 @@ on the user's behalf.
   - `test_get_page_content.py` — `get_page_content()` combining and
     short-circuit behavior.
   - `test_create_page.py` — `create_page()` local-preview validation,
-    `dry_run` defaulting/branching, and multiline content preservation.
+    `dry_run` defaulting/branching, multiline content preservation,
+    mocked live page creation (payload shape, success/error handling),
+    and Notion size-limit enforcement.
   - `test_protpcpl.py` — real MCP stdio protocol check (launches
     `server.py` as a subprocess, calls `tools/list` and `tools/call`).
   - `async_prac.py` — scratch file for practicing `asyncio`, unrelated
@@ -93,21 +101,25 @@ on the user's behalf.
 - Readable, bounded text extraction from page content
   (`read_page_blocks`).
 - Combined page metadata + body read (`get_page_content`).
-- Local preview for page creation (`create_page`, Phase 2.4.1):
+- Page creation (`create_page`, Phases 2.4.1 + 2.4.2), mocked only:
   `dry_run=True` (the default) validates and previews with zero
-  `request()` calls; `dry_run=False` returns a not-implemented error.
+  `request()` calls; `dry_run=False` builds and sends a real
+  page-create payload via one `request()` call. No live Notion write
+  has been made against the authorized workspace yet (Phase 2.4.3).
 
 Automated tests exist and pass for all of the above — mocked Notion
 API tests plus a real local MCP stdio protocol test (`pytest tests/`
-— 71 passed as of 2026-11-23). Most of these also have a manual live
+— 77 passed as of 2026-11-23). Most of these also have a manual live
 check script (`check_*.py`); see `PROJECT_CONTEXT.md` for which live
 checks have actually been run versus which are still pending.
 
 ### Planned, not implemented
 
-- Live page creation (Phase 2.4.2) and reading the new page back
-  (Phase 2.4.3), and a possible title-update operation (keep only if
-  it ends up implemented and justified).
+- A real, approved live call to `create_page(..., dry_run=False)`
+  against the authorized workspace, followed by reading the new page
+  back with `get_page_content()` to confirm the round-trip (Phase
+  2.4.3), and a possible title-update operation (keep only if it ends
+  up implemented and justified).
 - Exposing any Notion operation (search, read, write) as an actual
   `@mcp.tool()` in `server.py` — right now only `health` is exposed
   (Phase 3).

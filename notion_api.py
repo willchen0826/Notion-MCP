@@ -9,9 +9,15 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_API_VERSION = "2026-03-11"
 
 PAGE_ID_PATTERN = re.compile(
-    r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?"
-    r"[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
+    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})$"
 )
+
+# Notion's per rich-text-segment character limit, and the practical
+# limit on how many child blocks one /pages create call can carry
+# (matching the documented append-children batch size).
+NOTION_RICH_TEXT_MAX_LENGTH = 2000
+NOTION_MAX_CHILD_BLOCKS = 100
 
 # Block types whose text lives at block[type]["rich_text"].
 RICH_TEXT_BLOCK_TYPES = frozenset(
@@ -1100,6 +1106,29 @@ class NotionAPIClient:
             "next_cursor": next_cursor,
         }
 
+    def _chunk_rich_text(self, text: str) -> list[dict[str, Any]]:
+        """Split text into Notion rich_text objects, each <= 2000 chars.
+
+        Notion rejects a single rich_text segment longer than
+        NOTION_RICH_TEXT_MAX_LENGTH characters. Splitting on raw
+        character count (not word boundaries) represents arbitrarily
+        long text as multiple segments of one block, instead of
+        truncating it. An empty string becomes an empty list, since
+        Notion blocks may have zero rich_text entries (a blank line).
+        """
+        if text == "":
+            return []
+
+        return [
+            {
+                "type": "text",
+                "text": {
+                    "content": text[i : i + NOTION_RICH_TEXT_MAX_LENGTH]
+                },
+            }
+            for i in range(0, len(text), NOTION_RICH_TEXT_MAX_LENGTH)
+        ]
+
     def create_page(
         self,
         parent_page_id: str,
@@ -1108,26 +1137,28 @@ class NotionAPIClient:
         *,
         dry_run: bool = True,
     ) -> dict[str, Any]:
-        """Preview, and eventually create, a child page under a parent.
+        """Preview, or create, a child page under a parent page.
 
         parent_page_id identifies an existing page to create the new
         page under; it can come from search_pages() or get_page().
 
         dry_run defaults to True. With dry_run=True (or omitted), this
-        only validates the inputs and returns a local preview of the
-        parent_page_id, title, and content that would be sent to
-        Notion -- it never calls request(), so it cannot confirm that
-        the parent page exists or that this connection can write
-        there. With dry_run=False, live creation is not implemented
-        yet (planned for Phase 2.4.2); this returns a structured error
-        instead of calling request().
+        only validates the inputs -- including the same Notion size
+        limits that live creation must satisfy -- and returns a local
+        preview of the parent_page_id, title, and content that would
+        be sent to Notion. It never calls request(), so it cannot
+        confirm that the parent page exists or that this connection
+        can write there. With dry_run=False, it builds the page-create
+        payload from the same validated values and calls request()
+        exactly once to create the page.
 
         parent_page_id and title are stripped before use. content is
         kept exactly as given, including internal blank lines and
         leading/trailing whitespace on its own lines, since it is the
-        study-note body text. Phase 2.4.2 can reuse these same
-        stripped/validated values -- the preview shows precisely what
-        would be sent.
+        study-note body text: each line of content becomes one
+        paragraph block (an empty line becomes an empty paragraph),
+        so line breaks survive as separate blocks instead of being
+        collapsed into one block's rich_text.
         """
         if not isinstance(parent_page_id, str):
             return oauth.error_result(
@@ -1158,6 +1189,15 @@ class NotionAPIClient:
 
         title = title.strip()
 
+        if len(title) > NOTION_RICH_TEXT_MAX_LENGTH:
+            return oauth.error_result(
+                "INVALID_TITLE",
+                f"title must be at most {NOTION_RICH_TEXT_MAX_LENGTH} "
+                "characters.",
+                False,
+                "Shorten the title.",
+            )
+
         if not isinstance(content, str) or not content.strip():
             return oauth.error_result(
                 "INVALID_CONTENT",
@@ -1174,23 +1214,90 @@ class NotionAPIClient:
                 "Use dry_run=True to preview, or omit it.",
             )
 
-        if not dry_run:
+        lines = content.split("\n")
+
+        if len(lines) > NOTION_MAX_CHILD_BLOCKS:
             return oauth.error_result(
-                "PAGE_CREATION_NOT_IMPLEMENTED",
-                "Live page creation is planned for Phase 2.4.2 and "
-                "is not implemented yet.",
+                "CONTENT_TOO_LARGE",
+                f"content has {len(lines)} lines, but a single page "
+                f"can be created with at most "
+                f"{NOTION_MAX_CHILD_BLOCKS} child blocks (one "
+                "paragraph block per line).",
                 False,
-                "Call create_page() with dry_run=True (the default) "
-                "to preview the page.",
+                "Shorten the content, or split it across multiple "
+                "pages.",
+            )
+
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "created": False,
+                "preview": {
+                    "parent_page_id": parent_page_id,
+                    "title": title,
+                    "content": content,
+                },
+            }
+
+        children = [
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": self._chunk_rich_text(line)},
+            }
+            for line in lines
+        ]
+
+        payload = {
+            "parent": {"page_id": parent_page_id},
+            "properties": {
+                "title": {"title": self._chunk_rich_text(title)},
+            },
+            "children": children,
+        }
+
+        response = self.request(
+            "POST",
+            "/pages",
+            json_body=payload,
+            read_only=False,
+        )
+
+        if "error" in response:
+            return response
+
+        data = response["data"]
+
+        try:
+            if data["object"] != "page":
+                raise ValueError("Unexpected object type")
+
+            if not isinstance(data["id"], str) or not data["id"]:
+                raise ValueError("Invalid page ID")
+
+            if not isinstance(data["url"], str) or not data["url"]:
+                raise ValueError("Invalid page URL")
+
+            new_title = self._extract_page_title(data)
+
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return oauth.error_result(
+                "INVALID_CREATE_PAGE_RESPONSE",
+                "Notion returned an unexpected response after "
+                "creating the page.",
+                False,
+                "Check the parent page in Notion before retrying -- "
+                "the page may have already been created.",
             )
 
         return {
             "ok": True,
-            "dry_run": True,
-            "created": False,
-            "preview": {
-                "parent_page_id": parent_page_id,
-                "title": title,
-                "content": content,
+            "dry_run": False,
+            "created": True,
+            "page": {
+                "id": data["id"],
+                "title": new_title,
+                "url": data["url"],
             },
         }

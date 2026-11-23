@@ -15,22 +15,26 @@ CS146S Week 2 assignment. The user is learning Python and practicing
 English through this project.
 
 **Current phase.** Phase 2.3 (reading page content) is complete,
-through subphase 2.3.5. Phase 2.4.1 (local preview for page creation)
-is now also complete. Phase 2.4.2 (live page creation) is planned
-next but not started.
+through subphase 2.3.5. Phase 2.4.1 (local preview) and Phase 2.4.2
+(live page creation) are both now complete, mocked only. Phase 2.4.3
+(live creation, then read the new page back) is planned next but not
+started.
 
-**Last verified result.** `python -m pytest tests/ -v` → **71 passed**
+**Last verified result.** `python -m pytest tests/ -v` → **77 passed**
 on 2026-11-23 — mocked Notion API tests plus a real local MCP stdio
-protocol test (`test_protpcpl.py`); no live Notion calls (59 from
-before Phase 2.4.1, plus 12 new in `tests/test_create_page.py`).
-Separately, per the user's own terminal evidence (`writeup.md`'s
-"Recorded live evidence" table): page-metadata retrieval, the
-direct-children batch, the depth-zero traversal, and the bounded text
-read have all been exercised live against the real Notion API and
-matched expectations. Only the combined `get_page_content()` live
-check (`check_get_page_content.py`) is still pending for Phase 2.3;
-`create_page()` has no live check yet since it makes no network calls
-at all in this phase.
+protocol test (`test_protpcpl.py`); no live Notion calls (71 from
+before Phase 2.4.2, plus 6 net new in `tests/test_create_page.py`:
+18 total there now, up from 12). All of Phase 2.4.2's tests, including
+the one that actually exercises `create_page(..., dry_run=False)`
+end to end, mock `NotionAPIClient.request()` — no real POST to
+`/pages` has been made. Separately, per the user's own terminal
+evidence (`writeup.md`'s "Recorded live evidence" table): page-metadata
+retrieval, the direct-children batch, the depth-zero traversal, and
+the bounded text read have all been exercised live against the real
+Notion API and matched expectations. Only the combined
+`get_page_content()` live check (`check_get_page_content.py`) is still
+pending for Phase 2.3; `create_page()` has no live check yet at all
+(neither dry_run mode has been exercised against the real API).
 
 **Open questions.**
 - Phase 2.2: some titles in the raw `/search` response lacked the
@@ -39,11 +43,13 @@ at all in this phase.
   `check_get_page_content.py "YOUR_W2_TEST_PAGE_ID"` is the only
   remaining open item.
 
-**Next action.** Implement Phase 2.4.2: live page creation, called
-only after explicit approval of the Phase 2.4.1 preview; return the
-new page's ID and URL. Do not start this without the user's explicit
-request — the Learning Workflow rule in `CLAUDE.md` says to work in
-small, explicitly requested steps.
+**Next action.** Implement Phase 2.4.3: a real live call to
+`create_page(..., dry_run=False)` against the authorized workspace,
+followed by `get_page_content()` on the returned page ID to confirm
+the written title/body round-trips. Do not start this without the
+user's explicit request — the Learning Workflow rule in `CLAUDE.md`
+says to work in small, explicitly requested steps, and live writes
+need explicit approval.
 
 ---
 
@@ -61,7 +67,7 @@ small, explicitly requested steps.
 | 2.3.4 | Readable text extraction (`read_page_blocks`) | Done |
 | 2.3.5 | Combined metadata + body (`get_page_content`) | Done |
 | 2.4.1 | Local preview for page creation (`create_page`, `dry_run`) | Done |
-| 2.4.2 | Page creation | Planned |
+| 2.4.2 | Page creation (`create_page`, `dry_run=False`, mocked only) | Done |
 | 2.4.3 | Live creation, then read the new page back | Planned |
 | (maybe) | Title-update operation | Planned, keep only if implemented and justified |
 | 3 | Register operations as `@mcp.tool()`s in `server.py` | Planned |
@@ -427,16 +433,116 @@ below are read from `notion_api.py`, `tests/test_get_page_content.py`,
   - **Live check:** none exists or is needed yet — every path in this
     phase makes zero network calls by design.
 
-#### 2.4.2 — Page creation (planned, not started)
+#### 2.4.2 — Page creation (`create_page`, `dry_run=False`) — Done, 2026-11-23 (mocked only)
+
+- **Requested outcome.** Replace the `PAGE_CREATION_NOT_IMPLEMENTED`
+  branch with a real `POST /pages` call when `create_page()` is
+  called with `dry_run=False`. Reuse Phase 2.4.1's validation and
+  stripped values; keep the preview as the default. Build the Notion
+  payload from `parent.page_id`, `properties.title`, and paragraph
+  blocks in `children`. Validate applicable Notion size limits
+  consistently for preview and creation, with no silent truncation.
+  On success, return `ok=True, dry_run=False, created=True`, and page
+  metadata (`id`, `title`, `url`), validating the response before
+  reporting success. Pass request-layer errors through unchanged. If
+  the success response is malformed, tell the caller to check the
+  parent page before retrying, since creation may have already
+  succeeded. Also check whether a previously identified
+  partially-dashed-UUID regression in `PAGE_ID_PATTERN` was already
+  fixed and covered by a test. Update `tests/test_create_page.py`
+  accordingly; no live Notion write; no commit/push; MCP registration
+  stays Phase 3.
+- **Regression found and fixed.** `PAGE_ID_PATTERN` was **not** fixed
+  and had no regression test anywhere in the repo. Each dash in the
+  pattern was independently optional
+  (`[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?...`), so a UUID with only *some*
+  of its dashes removed — e.g. `PARENT_ID.replace("-", "", 1)`,
+  `"111111111111-1111-1111-111111111111"` — still matched, even
+  though it is neither a well-formed dashed UUID nor 32 raw hex
+  digits. Verified directly: `PAGE_ID_PATTERN.match(partial)` returned
+  a match before the fix. Replaced the pattern with a single
+  alternation — `(?:8-4-4-4-12 with required dashes)|(?:32 hex digits,
+  no dashes)` — so a page/block ID must now be fully dashed or
+  completely dashless, never a mix. This pattern is shared by
+  `get_page()`, `get_block_children()`, `_walk_block_tree()`, and
+  `create_page()`, so the fix applies to all four; a regression test
+  was added only in `tests/test_create_page.py`
+  (`test_create_page_rejects_partially_dashed_parent_id`), since that
+  is the file this instruction scoped the work to — the other three
+  methods' own test files do not yet have an equivalent case.
+- **Decisions and reasons.**
+  - Each line of `content` (split on `"\n"`) becomes one paragraph
+    block in `children`, including an empty line becoming an empty
+    paragraph block (`rich_text: []`) — reason: Notion blocks are the
+    natural unit for a line break, and this preserves blank lines and
+    per-line leading whitespace (indentation) exactly, rather than
+    collapsing everything into one block's `rich_text` and losing
+    which parts were separate lines.
+  - A new `_chunk_rich_text()` helper splits any string into Notion
+    rich_text segments of at most 2000 characters each (Notion's own
+    per-segment limit), used for both the title and every paragraph's
+    text — reason: this represents arbitrarily long text as several
+    rich_text objects within one block instead of silently truncating
+    it, satisfying "never silently truncate the user's notes" without
+    needing multiple Notion blocks just to hold one long line.
+  - A line count over `NOTION_MAX_CHILD_BLOCKS` (100, matching
+    Notion's documented append-children batch size) is rejected with
+    `CONTENT_TOO_LARGE` **before** building any payload or calling
+    `request()`, in both `dry_run` modes — reason: a single `/pages`
+    call cannot carry more than ~100 children blocks, so the preview
+    must fail the same way creation would, rather than previewing
+    successfully and then failing only at creation time.
+  - Title length is capped at the same 2000-character rich_text limit
+    (reusing the existing `INVALID_TITLE` error code with a
+    length-specific message) — same reasoning as the line-count
+    check: one consistent set of size checks for both preview and
+    creation.
+  - A malformed-but-2xx response (missing/invalid `id` or `url`, or
+    the wrong `object` type) returns a new `INVALID_CREATE_PAGE_RESPONSE`
+    error whose `suggested_action` explicitly says to check the parent
+    page before retrying — reason: unlike a read, a malformed response
+    to a *write* does not mean the write failed; Notion may have
+    already created the page, so blindly retrying could create a
+    duplicate.
+  - Request-layer errors (`"error" in response`) are returned
+    completely unchanged, with no wrapping — reason: `request()`
+    already attaches the correct `retryable`/`suggested_action` for
+    each failure mode (network error, 403/404/429/5xx, failed
+    refresh); re-describing them here would risk drifting from that
+    single source of truth.
+- **Files/functions.** `notion_api.py`: `PAGE_ID_PATTERN` (fixed),
+  `NOTION_RICH_TEXT_MAX_LENGTH`, `NOTION_MAX_CHILD_BLOCKS` (new
+  constants), `_chunk_rich_text()` (new), `create_page()` (dry_run=False
+  branch replaced).
+- **Verification.**
+  - **Tests in repo:** `tests/test_create_page.py` now has 18 cases
+    (up from 12): all 12 original preview/validation cases kept (still
+    zero-`request()`-call), plus a partially-dashed-UUID regression
+    test, a title-too-long test, a too-many-lines test, and four new
+    `dry_run=False` cases — a full success path asserting the exact
+    `("POST", "/pages")` call, the exact payload shape (`parent`,
+    `properties.title`, `children` as one paragraph block per line),
+    `read_only=False`, and exactly one call to `request()`; a dedicated
+    blank-line/indentation-preservation case asserting the built
+    `children` list directly; a request-error-passthrough case; and a
+    malformed-success-response case.
+  - **Tests run:** yes — `python -m pytest tests/test_create_page.py
+    -v` → **18 passed**; `python -m pytest tests/ -v` (full regression)
+    → **77 passed**, both on 2026-11-23.
+  - **Live check:** none — every test in this phase mocks
+    `NotionAPIClient.request()`; no real `POST /pages` has been made
+    against the authorized workspace. That live call, followed by a
+    `get_page_content()` read-back, is Phase 2.4.3.
+
+#### 2.4.3 — Live creation and read-back (planned, not started)
 *Reconstructed summary — decisions below come from a separate ChatGPT
 conversation's handoff notes, not from a prompt available in any
 session recorded here. Do not treat these as already implemented.*
 
-- Create the page only after explicit approval of the Phase 2.4.1
-  preview; return the new page's ID and URL.
-- **2.4.3 — Live creation and read-back.** Create a real page live,
-  then read it back with `get_page_content()` to confirm the written
-  content round-trips.
+- Create a real page live, with explicit approval, only after
+  reviewing the Phase 2.4.1 preview; return the new page's ID and URL.
+- Read the new page back with `get_page_content()` to confirm the
+  written title/body round-trips.
 - **Capability justification (from `writeup.md`).** `Read content` is
   justified by search + read; `Insert content` by creation;
   `Update content` only if a title-update operation ships. Reassess
@@ -497,6 +603,20 @@ to the phase section with the full reasoning.
 14. `create_page()`'s validated values are themselves the preview —
     no separate internal "prepare" representation that could drift
     from what the preview shows — 2.4.1.
+15. `PAGE_ID_PATTERN` must require a fully-dashed UUID or completely
+    dashless 32 hex digits, never a mix — fixed a regression where
+    each dash was independently optional — 2.4.2.
+16. One paragraph block per line of `content` (empty line → empty
+    paragraph), so line breaks and blank lines survive as separate
+    blocks instead of being collapsed into one block's `rich_text` —
+    2.4.2.
+17. Long text is chunked into multiple ≤2000-character rich_text
+    segments (`_chunk_rich_text()`) rather than truncated; a
+    too-many-lines content is rejected before any request, in both
+    `dry_run` modes — 2.4.2.
+18. A malformed-but-2xx create-page response tells the caller to
+    check the parent page before retrying, since the write may have
+    already succeeded — 2.4.2.
 
 ---
 
@@ -838,3 +958,70 @@ evidence exists.
 - **What remains.** Phase 2.4.2 (live creation, after explicit
   approval of the preview) and 2.4.3 (live creation + read-back) are
   still planned, not started. MCP registration remains Phase 3.
+
+### Implement Phase 2.4.2 (2026-11-23)
+> "Implement Phase 2.4.2: create a Notion child page when create_page()
+> is explicitly called with dry_run=False. Read CLAUDE.md, the "Resume
+> here" section of PROJECT_CONTEXT.md, and the existing create_page()
+> method and tests first.
+>
+> Keep the Phase 2.4.1 preview as the default. Reuse its input
+> validation and preserve the exact body text, including blank lines
+> and indentation. Check whether the previously identified partially
+> dashed UUID regression is already fixed and covered by a test.
+>
+> Replace the PAGE_CREATION_NOT_IMPLEMENTED branch. Build the Notion
+> payload using parent.page_id, properties.title, and paragraph
+> blocks in children. Validate applicable Notion size limits
+> consistently for preview and creation. If the input cannot be
+> represented, return an actionable validation error before sending a
+> request. Never silently truncate the user's notes.
+>
+> Use the existing request layer:
+>     self.request("POST", "/pages", json_body=payload, read_only=False)
+>
+> On success, return a compact result with ok=True, dry_run=False,
+> created=True, and page metadata containing the new page's ID,
+> title, and URL. Validate the response before reporting success.
+> Pass existing request-layer errors through unchanged. If a success
+> response is malformed, tell the caller to inspect the parent page
+> before retrying, because creation may already have succeeded. Keep
+> retry handling in the existing request layer.
+>
+> Update tests/test_create_page.py. Replace the obsolete test that
+> expects PAGE_CREATION_NOT_IMPLEMENTED. Use distinct synthetic
+> parent and new-page IDs so the success test catches returning the
+> wrong ID. Verify the exact request path, payload, read_only=False,
+> and one call to self.request(). Cover multiline body preservation,
+> request-error passthrough, malformed success responses, and the
+> chosen size-limit behavior. Keep the existing zero-request preview
+> and validation tests.
+>
+> Run the focused tests and full automated suite. Update
+> PROJECT_CONTEXT.md and writeup.md with the actual results, clearly
+> labeling the write tests as mocked. Explain one successful call
+> from input to output. Leave live Notion writes for Phase 2.4.3 and
+> MCP registration for Phase 3. Do not commit or push."
+
+- **Phase.** 2.4.2.
+- **Requested outcome / acceptance criteria.** See the quoted
+  instruction above; full detail of what was built is in the Phase
+  2.4.2 history section above.
+- **Files/functions changed.** `notion_api.py`: `PAGE_ID_PATTERN`
+  fixed; `NOTION_RICH_TEXT_MAX_LENGTH`, `NOTION_MAX_CHILD_BLOCKS`,
+  `_chunk_rich_text()` added; `create_page()`'s `dry_run=False` branch
+  replaced. `tests/test_create_page.py`: 6 new cases added (18 total,
+  up from 12).
+- **Decisions and reasons.** See Phase 2.4.2 above (shared
+  `PAGE_ID_PATTERN` regression fix; one paragraph block per line;
+  rich-text chunking instead of truncation; size limits enforced
+  before any request, in both `dry_run` modes; malformed-response
+  handling distinct from a request-layer error).
+- **Commands actually run and results observed.**
+  `python -m pytest tests/test_create_page.py -v` → 18 passed.
+  `python -m pytest tests/ -v` → 77 passed (full suite, 2026-11-23).
+  No live Notion call was made; no commit was made.
+- **What remains.** Phase 2.4.3 (a real live `create_page(...,
+  dry_run=False)` call, followed by `get_page_content()` on the
+  result to confirm the round-trip) is still planned, not started.
+  MCP registration remains Phase 3.
