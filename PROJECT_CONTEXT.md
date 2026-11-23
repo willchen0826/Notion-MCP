@@ -15,30 +15,33 @@ CS146S Week 2 assignment. The user is learning Python and practicing
 English through this project.
 
 **Current phase.** Phase 2.3 (reading page content) is complete,
-through subphase 2.3.5. Phase 2.4 (local preview, then page creation)
-is planned next but not started.
+through subphase 2.3.5. Phase 2.4.1 (local preview for page creation)
+is now also complete. Phase 2.4.2 (live page creation) is planned
+next but not started.
 
-**Last verified result.** `python -m pytest tests/ -v` → **59 passed**
-(mocked, no network), run 2026-11-22. This is the first time the
-*full* suite's count was confirmed in this record — `writeup.md`
-previously listed it as pending. The Phase 2.3 **live** combined-read
-check (`check_get_page_content.py`) has not been run in any session
-recorded here; its expected assertions are written into the script
-(see Phase 2.3.5 below) but the actual outcome is still pending.
+**Last verified result.** `python -m pytest tests/ -v` → **71 passed**
+on 2026-11-23 — mocked Notion API tests plus a real local MCP stdio
+protocol test (`test_protpcpl.py`); no live Notion calls (59 from
+before Phase 2.4.1, plus 12 new in `tests/test_create_page.py`).
+Separately, per the user's own terminal evidence (`writeup.md`'s
+"Recorded live evidence" table): page-metadata retrieval, the
+direct-children batch, the depth-zero traversal, and the bounded text
+read have all been exercised live against the real Notion API and
+matched expectations. Only the combined `get_page_content()` live
+check (`check_get_page_content.py`) is still pending for Phase 2.3;
+`create_page()` has no live check yet since it makes no network calls
+at all in this phase.
 
 **Open questions.**
 - Phase 2.2: some titles in the raw `/search` response lacked the
   literal query text. Cause unconfirmed.
-- Phase 2.3.5 / final acceptance: the live run of
-  `check_get_page_content.py "YOUR_W2_TEST_PAGE_ID"` and a live run of
-  the full pytest suite are both still pending in this record.
+- Phase 2.3 final acceptance: the live run of
+  `check_get_page_content.py "YOUR_W2_TEST_PAGE_ID"` is the only
+  remaining open item.
 
-**Next action.** Per the active plan (reconstructed from a separate
-ChatGPT handoff, see Phase 2.4 below): implement Phase 2.4.1, a local
-preview for page creation. The next implementation test is expected to
-omit `dry_run`, check that the preview correctly identifies the parent,
-title, and content, and assert that `request()` is never called for a
-preview-only call. Do not start this without the user's explicit
+**Next action.** Implement Phase 2.4.2: live page creation, called
+only after explicit approval of the Phase 2.4.1 preview; return the
+new page's ID and URL. Do not start this without the user's explicit
 request — the Learning Workflow rule in `CLAUDE.md` says to work in
 small, explicitly requested steps.
 
@@ -57,7 +60,7 @@ small, explicitly requested steps.
 | 2.3.3 | Bounded block-tree traversal (`_walk_block_tree`/`_walk_children`) | Done |
 | 2.3.4 | Readable text extraction (`read_page_blocks`) | Done |
 | 2.3.5 | Combined metadata + body (`get_page_content`) | Done |
-| 2.4.1 | Local preview for page creation (`dry_run`) | Planned |
+| 2.4.1 | Local preview for page creation (`create_page`, `dry_run`) | Done |
 | 2.4.2 | Page creation | Planned |
 | 2.4.3 | Live creation, then read the new page back | Planned |
 | (maybe) | Title-update operation | Planned, keep only if implemented and justified |
@@ -127,9 +130,11 @@ tests-run / live-results kept distinct and missing evidence marked
   401, and turns every failure mode into a structured, actionable
   error instead of raising.
 - **Design decisions.**
-  - Exactly one refresh-and-retry attempt after a 401, not a loop —
-    reason: avoid masking a genuinely broken credential behind
-    repeated silent refreshes.
+  - Exactly one refresh attempt after a 401; the original request is
+    retried only if that refresh succeeds — a failed refresh returns
+    its own error immediately, with no retry. Never a loop — reason:
+    avoid masking a genuinely broken credential behind repeated
+    silent refreshes.
   - `read_only` flag on `request()` changes whether network/5xx/JSON
     errors are marked `retryable` and what `suggested_action` says —
     reason: a timed-out *write* may have already reached Notion, so
@@ -192,8 +197,11 @@ summary.
   accepted, invalid/non-string ID rejected without a request,
   request-error passthrough, malformed response →
   `INVALID_PAGE_RESPONSE`). **Tests run:** yes, 2026-11-22 (6 passed).
-  **Live check:** `check_get_page.py` exists; not run in any session
-  recorded here — pending.
+  **Live check:** user-reported terminal evidence (`writeup.md`'s
+  "Recorded live evidence" table; reconciled into this record
+  2026-11-23) — the metadata lookup returned the selected page's ID,
+  title, and URL. Source: the user; not observed directly in any
+  session recorded here.
 
 #### 2.3.2 — One batch of child blocks (`get_block_children`)
 
@@ -212,8 +220,11 @@ summary.
 - **Files/functions.** `notion_api.py::get_block_children()`.
 - **Verification.** **Tests in repo:** `tests/test_get_block_children.py`
   (13 cases). **Tests run:** yes, 2026-11-22 (13 passed). **Live
-  check:** `check_get_block_children.py` exists; not run in any session
-  recorded here — pending.
+  check:** user-reported terminal evidence (`writeup.md`'s "Recorded
+  live evidence" table; reconciled 2026-11-23) — a direct-children
+  call with `page_size=2` returned a heading and a table; the table
+  had children, and the page had another batch. Source: the user; not
+  observed directly in any session recorded here.
 
 #### 2.3.3 — Bounded block-tree traversal (`_walk_block_tree`)
 
@@ -261,8 +272,13 @@ summary.
 - **Verification.** **Tests in repo:** `tests/test_block_tree.py`
   (16 cases, listed in the roadmap/history above by name in the test
   file itself). **Tests run:** yes, 2026-11-22 (16 passed). **Live
-  check:** `check_block_tree.py` exists; not run in any session
-  recorded here — pending.
+  check:** user-reported terminal evidence (`writeup.md`'s "Recorded
+  live evidence" table; reconciled 2026-11-23) — a traversal with
+  `max_depth=0` recorded 17 direct children in one call and reported
+  `max_depth_reached=true`; a traversal limited to one allowed call
+  with `page_size=2` recorded two blocks and reported
+  `max_requests_reached=true`. Source: the user; not observed directly
+  in any session recorded here.
 
 #### 2.3.4 — Readable text extraction (`read_page_blocks`)
 
@@ -308,8 +324,12 @@ summary.
   (13 cases). **Tests run:** yes, 2026-11-22 (13 passed, also
   confirmed in the prior session after an accidental overwrite was
   restored — 54/54 at that time, before 2.3.5's tests existed). **Live
-  check:** `check_read_page_blocks.py` exists; not run in any session
-  recorded here — pending.
+  check:** user-reported terminal evidence (`writeup.md`'s "Recorded
+  live evidence" table; reconciled 2026-11-23) — a text read with
+  `max_depth=1`, `max_blocks=6`, `page_size=2` returned a heading, a
+  table, and four table rows across four child-list calls, with only
+  `max_blocks_reached=true`. Source: the user; not observed directly
+  in any session recorded here.
 - **Incident.** Between this subphase's implementation and 2.3.5, the
   user accidentally overwrote `notion_api.py` with an older editor
   buffer, losing all of 2.3.4's additions. They were restored from the
@@ -349,22 +369,71 @@ below are read from `notion_api.py`, `tests/test_get_page_content.py`,
     heading + table layout, Chinese cell text) and a `max_blocks=6`
     boundary. Per `writeup.md`, this live run's outcome is still
     **pending** — it is not confirmed in this record whether it has
-    actually been executed against the real API.
+    actually been executed against the real API. As of the 2026-11-23
+    reconciliation, this is the only Phase 2.3 live check still
+    pending.
 
-### Phase 2.4 — Preview and page creation (planned, not started)
+### Phase 2.4 — Preview and page creation
+
+#### 2.4.1 — Local preview (`create_page`) — Done, 2026-11-23
+
+- **Requested outcome.** Add `create_page(parent_page_id, title,
+  content, *, dry_run=True)` to `NotionAPIClient`. Validate
+  `parent_page_id` (UUID with dashes or 32 hex digits), `title`
+  (non-blank), `content` (non-blank, preserving internal whitespace
+  and line breaks), and `dry_run` (must be a real `bool`), all
+  locally. With `dry_run` omitted or `True`, return `{ok: True,
+  dry_run: True, created: False, preview: {parent_page_id, title,
+  content}}`. With `dry_run=False`, return a structured error, since
+  live creation is Phase 2.4.2's job. Every path makes zero calls to
+  `request()`. Add focused tests in `tests/test_create_page.py`,
+  including an omitted-`dry_run` main test using
+  `request.assert_not_called()`. MCP registration stays out of scope
+  (Phase 3); no live Notion check; no commit.
+- **Decisions and reasons.**
+  - `parent_page_id` reuses the existing `PAGE_ID_PATTERN` (the same
+    one `get_page()`/`get_block_children()` use) rather than a new,
+    narrower pattern — reason: consistency with the rest of the
+    codebase; it already accepts both a dashed UUID and 32 hex
+    digits, which is a superset of, but compatible with, what was
+    asked.
+  - `parent_page_id` and `title` are stripped before being validated
+    and returned; `content` is left completely untouched (only
+    `.strip()`'d for the blank-check, never reassigned) — reason:
+    the spec asked for whitespace/line breaks in the *body* to be
+    preserved exactly, while a page title or ID with stray
+    surrounding whitespace is very unlikely to be intentional.
+  - `dry_run` is validated with `type(dry_run) is not bool`, not
+    `isinstance`, so truthy/falsy non-bool values (`1`, `"True"`,
+    etc.) are rejected rather than silently coerced — the same style
+    already used for `page_size`/`max_depth` elsewhere, flipped to
+    require exactly `bool` here.
+  - The validated, stripped values are exactly what the preview
+    shows — there is no separate "prepare" step that could drift
+    from the preview, so Phase 2.4.2 can reuse these same values
+    for the real Notion write without re-deriving them.
+- **Files/functions.** `notion_api.py::create_page()`.
+- **Verification.**
+  - **Tests in repo:** `tests/test_create_page.py` (12 cases: preview
+    with `dry_run` omitted and asserting `request.assert_not_called()`;
+    explicit `dry_run=True`; dashless parent ID accepted; explicit
+    `dry_run=False` → `PAGE_CREATION_NOT_IMPLEMENTED`; multiline/blank-
+    line content preserved exactly; invalid/non-string parent ID;
+    blank/non-string title; blank/non-string content; non-boolean
+    `dry_run`).
+  - **Tests run:** yes — `python -m pytest tests/test_create_page.py
+    -v` → 12 passed; `python -m pytest tests/ -v` (full regression)
+    → **71 passed**, both on 2026-11-23.
+  - **Live check:** none exists or is needed yet — every path in this
+    phase makes zero network calls by design.
+
+#### 2.4.2 — Page creation (planned, not started)
 *Reconstructed summary — decisions below come from a separate ChatGPT
 conversation's handoff notes, not from a prompt available in any
 session recorded here. Do not treat these as already implemented.*
 
-- **2.4.1 — Local preview.** A `dry_run` (or similarly named) mode that
-  identifies the intended parent, title, and content of a page to be
-  created, without calling `request()`. The next planned test: call
-  the preview path with `dry_run` omitted (i.e. relying on whatever
-  default the implementation chooses), assert it still only previews
-  (identifies parent/title/content correctly) and that `request()` is
-  never called.
-- **2.4.2 — Page creation.** Create the page only after explicit
-  approval of the preview; return the new page's ID and URL.
+- Create the page only after explicit approval of the Phase 2.4.1
+  preview; return the new page's ID and URL.
 - **2.4.3 — Live creation and read-back.** Create a real page live,
   then read it back with `get_page_content()` to confirm the written
   content round-trips.
@@ -418,9 +487,16 @@ to the phase section with the full reasoning.
    `None` (unsupported/malformed), and real text — 2.3.4.
 10. `read_only` flag changes retry/`suggested_action` semantics for
     request-layer errors — 2.1.
-11. Exactly one 401-refresh-and-retry, never a loop — 2.1.
+11. Exactly one 401 refresh attempt; the original request retries
+    only after that refresh succeeds, never a loop — 2.1.
 12. Tokens cached in a git-ignored, permission-restricted file, never
     printed — Phase 1, `CLAUDE.md` Credential Handling Rules.
+13. `create_page()` strips `parent_page_id`/`title` but leaves
+    `content` untouched, to preserve study-note whitespace/line
+    breaks exactly while still normalizing IDs/titles — 2.4.1.
+14. `create_page()`'s validated values are themselves the preview —
+    no separate internal "prepare" representation that could drift
+    from what the preview shows — 2.4.1.
 
 ---
 
@@ -612,8 +688,153 @@ evidence exists.
   specific file, test run, or commit referenced inline.
 - **What remains.** The items listed under "Open questions" above
   (live checks for `check_get_page.py`, `check_get_block_children.py`,
-  `check_block_tree.py`, `check_read_page_blocks.py`,
-  `check_get_page_content.py`, and the full live Phase 2.3 acceptance
-  check) are all still pending — none were run in this step, per the
-  standing rule against running live API calls without an explicit
-  request.
+  `check_block_tree.py`, `check_read_page_blocks.py`, and
+  `check_get_page_content.py`) were all still pending **as of this
+  session** — none were run in this step, per the standing rule
+  against running live API calls without an explicit request. This
+  reflects what this session itself had observed, not whether those
+  checks had already happened elsewhere; see the 2026-11-23
+  reconciliation entry below, which found that four of the five had
+  already been run by the user and reported in `writeup.md` before
+  this session began.
+
+### Reconcile documentation before Phase 2.4.1 (2026-11-23)
+> "Please reconcile CLAUDE.md, PROJECT_CONTEXT.md, and writeup.md
+> before we start Phase 2.4.1. This is a documentation-only task.
+>
+> 1. Keep the recorded result of 59 passing tests on 2026-11-22.
+>    Remove the contradictory statement that the full pytest run is
+>    pending. Describe the suite as mocked Notion API tests plus a
+>    real local MCP stdio protocol test.
+> 2. Record the earlier live checks as user-reported terminal
+>    evidence. Metadata retrieval succeeded. The direct-children check
+>    returned a heading and a table. The depth-zero traversal returned
+>    17 blocks in one call. The bounded text read returned six blocks
+>    in four child-list calls with max_blocks_reached=true. Only the
+>    combined get_page_content() live check is still pending for
+>    Phase 2.3.
+> 3. Keep historical entries accurate about what happened in their own
+>    sessions. Update the current status and add a dated reconciliation
+>    entry that identifies the user as the source of the earlier live
+>    results.
+> 4. State the Phase 2.4.1 contract explicitly: dry_run defaults to
+>    True. Omitting it must return a local preview of the parent,
+>    title, and content with zero calls to request().
+> 5. Correct the request() description: an initial 401 triggers one
+>    refresh attempt, and the original request is retried only after a
+>    successful refresh.
+> 6. Inspect the Markdown files in the repository. Fix escaped
+>    headings, tables, or code fences only if the formatting problem
+>    exists in those files."
+
+- **Phase.** Documentation / process, not a numbered implementation
+  phase.
+- **Requested outcome / acceptance criteria.** The six numbered points
+  above; show the "Resume here" section when done; leave
+  implementation, live API calls, and Git commits for the next
+  instruction.
+- **Source of the live-check evidence.** The four Phase 2.3 live
+  checks for 2.3.1–2.3.4 (metadata lookup; direct-children batch;
+  depth-zero traversal; bounded text read) are **user-reported
+  terminal evidence**, already present in `writeup.md`'s "Recorded
+  live evidence" table before this entry existed. No session recorded
+  in this log observed those live runs directly — the user is their
+  source. This entry supersedes the "pending" label those four checks
+  carried in the Phase 2.3.1–2.3.4 sections above and in the "What
+  remains" note directly above this entry; those earlier labels were
+  accurate for what each session itself had observed at the time, not
+  inaccurate history — the live evidence itself predates and is
+  independent of those sessions.
+- **Files/functions changed.** `PROJECT_CONTEXT.md`: "Resume here"
+  (last verified result, open questions, next action); Phase 2.1's
+  design decision and its index entry (`request()` retry-only-after-
+  success wording); Phase 2.3.1–2.3.4's "Live check" bullets (pending
+  → user-reported, done); Phase 2.3.5's note (now the only pending
+  Phase 2.3 live check); Phase 2.4.1's contract (made explicit); this
+  log entry added. `CLAUDE.md`: the test-suite summary line (now names
+  the real local MCP stdio protocol test alongside the mocked Notion
+  API tests) and the `request()` architecture bullet (retry only
+  after a successful refresh). `writeup.md`: Phase 2.1's paragraph
+  (retry only after a successful refresh) and the Phase 2.3
+  acceptance-check line (now also names the mocked-plus-protocol-test
+  suite explicitly).
+- **Commands actually run.** None — this was a text-only
+  reconciliation; no pytest run, no live API call, no git command.
+- **Markdown inspection (point 6).** Checked `CLAUDE.md`,
+  `PROJECT_CONTEXT.md`, and `writeup.md` for escaped headings,
+  malformed tables, and unbalanced code fences, via `grep` for lines
+  starting with an escaped `#`, for escaped pipes, and for
+  triple-backtick-fence counts. `CLAUDE.md` and `writeup.md` each have
+  exactly one balanced fence pair; `PROJECT_CONTEXT.md` has none; no
+  escaped headings or pipes were found; every table in `writeup.md`
+  and `PROJECT_CONTEXT.md` has a correctly-sized dash separator row
+  under its header. **No formatting problems existed, so nothing was
+  changed under point 6.**
+- **What remains.** Only the combined `get_page_content()` live check
+  (`check_get_page_content.py`) is still pending for Phase 2.3. Phase
+  2.4.1 implementation itself has not started.
+
+### Implement Phase 2.4.1 (2026-11-23)
+> "Implement Phase 2.4.1 of my Notion Study Assistant: local preview
+> for creating a child page. Read CLAUDE.md and the "Resume here"
+> section of PROJECT_CONTEXT.md first. Briefly explain the flow, then
+> implement it.
+>
+> Add this method to NotionAPIClient in notion_api.py:
+>
+>     create_page(parent_page_id: str, title: str, content: str,
+>                 *, dry_run: bool = True)
+>
+> The parent_page_id identifies the existing page where the new page
+> would be created. It can come from search_pages().
+>
+> For this phase:
+> - Validate the parent page ID, title, content, and dry_run locally.
+>   Accept a UUID with standard dashes or 32 hexadecimal digits.
+>   Require a nonblank title and nonblank text content for this
+>   study-note workflow. Preserve meaningful whitespace and line
+>   breaks in the body. Require a real boolean for dry_run.
+> - Prepare the data for a child page under that parent: the parent
+>   page ID, title, and paragraph content. Keep the prepared text
+>   consistent with what the preview shows, so Phase 2.4.2 can reuse
+>   it.
+> - When dry_run is omitted or True, return ok=True, dry_run=True,
+>   created=False, and a preview containing parent_page_id, title, and
+>   content. A local preview only validates the inputs; it cannot
+>   confirm that the parent exists or that the connection can write
+>   there.
+> - If dry_run=False, return an actionable structured error explaining
+>   that live creation is planned for Phase 2.4.2. Every path in 2.4.1
+>   must make zero calls to request(). Reuse the existing error
+>   format.
+>
+> Add focused tests in tests/test_create_page.py. In the main test,
+> omit dry_run deliberately, assert the preview fields, and use
+> request.assert_not_called(). Also cover explicit True, explicit
+> False, invalid inputs, and preservation of multiline content. Use
+> synthetic data and the project's existing mock patterns.
+>
+> Run the focused tests and the full automated suite. Update the
+> project records with the commands and results actually observed.
+> Keep this change in the Python client and its tests; MCP
+> registration belongs to Phase 3. Do not run a live Notion check or
+> commit changes."
+
+- **Phase.** 2.4.1.
+- **Requested outcome / acceptance criteria.** See the quoted
+  instruction above; full detail of what was built is in the Phase
+  2.4.1 history section above.
+- **Files/functions changed.** `notion_api.py::create_page()` added
+  (after `search_pages()`). `tests/test_create_page.py` added (12
+  cases).
+- **Decisions and reasons.** See Phase 2.4.1 above (reuse of
+  `PAGE_ID_PATTERN`; stripping ID/title but not content; strict
+  `type(...) is not bool` check; no separate "prepare" step since the
+  validated values are the preview).
+- **Commands actually run and results observed.**
+  `python -m pytest tests/test_create_page.py -v` → 12 passed.
+  `python -m pytest tests/ -v` → 71 passed (full suite, 2026-11-23).
+  No live Notion call was made; no commit was made.
+- **What remains.** Phase 2.4.2 (live creation, after explicit
+  approval of the preview) and 2.4.3 (live creation + read-back) are
+  still planned, not started. MCP registration remains Phase 3.

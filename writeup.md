@@ -27,7 +27,7 @@ The `login` command generates a random `state`, starts a local callback listener
 
 ## Phase 2.1 — Shared request handling
 
-All operations use `NotionAPIClient.request()`. After an initial HTTP 401, it attempts one silent refresh, reloads the cache, and retries once. If credentials still fail, the caller receives an error with a suggested action. Only explicit login opens a browser. The request layer also distinguishes read and write failures. A timed-out write may already have reached Notion, so its error tells the caller to check before trying again.
+All operations use `NotionAPIClient.request()`. After an initial HTTP 401, it attempts exactly one silent refresh; only if that refresh succeeds does it reload the cache and retry the original request once. If the refresh itself fails, or credentials still fail after the retry, the caller receives an error with a suggested action. Only explicit login opens a browser. The request layer also distinguishes read and write failures. A timed-out write may already have reached Notion, so its error tells the caller to check before trying again.
 
 **Observed checks.** `check_notion_api.py` completed a live search request. Mocked tests verified that a retry used the new access token and that a broken cache returned `TOKEN_CACHE_ERROR` before any network request.
 
@@ -65,7 +65,7 @@ All operations use `NotionAPIClient.request()`. After an initial HTTP 401, it at
 
 ### Final Phase 2.3 acceptance check
 
-Four unit tests cover successful assembly and forwarding of limits, preservation of a partial read, a metadata error that skips the body, and a body error that reaches the caller unchanged. The full mocked suite (`pytest tests/ -v`) was run on 2026-11-22: 59 passed. The combined live check (`check_get_page_content.py`) has not been run; its outcome remains pending in this record.
+Four unit tests cover successful assembly and forwarding of limits, preservation of a partial read, a metadata error that skips the body, and a body error that reaches the caller unchanged. The full suite — mocked Notion API tests plus a real local MCP stdio protocol test (`pytest tests/ -v`) — was run on 2026-11-22: 59 passed. The combined live check (`check_get_page_content.py`) has not been run; its outcome remains pending in this record.
 
 ```bash
 python -m pytest tests/ -q
@@ -74,9 +74,15 @@ python check_get_page_content.py "YOUR_W2_TEST_PAGE_ID"
 
 Replace `YOUR_W2_TEST_PAGE_ID` with the authorized test page's ID. The live checker uses the known W2 page layout. It expects the correct metadata, six blocks including readable table rows, and `complete=False` with `max_blocks_reached=True`. Record the actual pytest count and live outcome after running both commands.
 
+## Phase 2.4.1 — Local preview for page creation
+
+`create_page(parent_page_id, title, content, *, dry_run=True)` validates its inputs and returns a preview of the child page it would create, without contacting Notion. `dry_run` defaults to `True`; omitting it returns the same local preview (`parent_page_id`, `title`, `content`), with zero calls to `request()`. Live creation (`dry_run=False`) is not implemented yet; it returns a structured error naming Phase 2.4.2 instead of attempting anything. The parent page ID and title are validated and stripped; the content is preserved exactly, including internal blank lines and whitespace, since it is study-note body text.
+
+**Observed checks.** `python -m pytest tests/test_create_page.py -v` passed all 12 cases: the default preview (`dry_run` omitted), explicit `dry_run=True` and `dry_run=False`, a parent ID without dashes, multiline/blank-line content preserved exactly, and each invalid-input case (bad or non-string parent ID, blank or non-string title, blank or non-string content, a non-boolean `dry_run`). The full suite (`pytest tests/ -v`) passed 71 tests on 2026-11-23. No live Notion check applies to this phase, since every path makes zero calls to `request()`.
+
 ## Remaining work
 
-- **Phase 2.4 and planned title update.** Preview a new page with `dry_run=True`. Create it after explicit approval and return its ID and URL. Justify `Read content` for search and reading, `Insert content` for creation, and `Update content` if the title-update operation ships. Reassess the final capability set against the implemented operations.
+- **Phase 2.4.2 and 2.4.3, and planned title update.** Create the page only after explicit approval of the Phase 2.4.1 preview, and return its ID and URL; then read the new page back to confirm the write. Justify `Read content` for search and reading, `Insert content` for creation, and `Update content` if the title-update operation ships. Reassess the final capability set against the implemented operations.
 - **Phase 3.** Expose the Python operations as FastMCP tools. Document how a page ID returned by search becomes the input to reading or creation.
 - **Phase 4.** Encode parameter limits in the tool schemas. Add workflow instructions, read-only annotations, and a write preview. Check that errors tell the agent whether and how to retry.
 - **Phase 5.** Register the server with an MCP host. Capture a real multi-tool transcript, a failure and recovery example, and a protocol test against a final tool. Verify that expired or revoked credentials produce an actionable result during a tool call.

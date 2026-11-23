@@ -1099,3 +1099,98 @@ class NotionAPIClient:
             "has_more": has_more,
             "next_cursor": next_cursor,
         }
+
+    def create_page(
+        self,
+        parent_page_id: str,
+        title: str,
+        content: str,
+        *,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Preview, and eventually create, a child page under a parent.
+
+        parent_page_id identifies an existing page to create the new
+        page under; it can come from search_pages() or get_page().
+
+        dry_run defaults to True. With dry_run=True (or omitted), this
+        only validates the inputs and returns a local preview of the
+        parent_page_id, title, and content that would be sent to
+        Notion -- it never calls request(), so it cannot confirm that
+        the parent page exists or that this connection can write
+        there. With dry_run=False, live creation is not implemented
+        yet (planned for Phase 2.4.2); this returns a structured error
+        instead of calling request().
+
+        parent_page_id and title are stripped before use. content is
+        kept exactly as given, including internal blank lines and
+        leading/trailing whitespace on its own lines, since it is the
+        study-note body text. Phase 2.4.2 can reuse these same
+        stripped/validated values -- the preview shows precisely what
+        would be sent.
+        """
+        if not isinstance(parent_page_id, str):
+            return oauth.error_result(
+                "INVALID_PARENT_PAGE_ID",
+                "parent_page_id must be a string.",
+                False,
+                "Use an id returned by search_pages() or get_page().",
+            )
+
+        parent_page_id = parent_page_id.strip()
+
+        if not PAGE_ID_PATTERN.match(parent_page_id):
+            return oauth.error_result(
+                "INVALID_PARENT_PAGE_ID",
+                "parent_page_id must be a Notion page ID (a UUID, "
+                "with or without dashes).",
+                False,
+                "Use an id returned by search_pages() or get_page().",
+            )
+
+        if not isinstance(title, str) or not title.strip():
+            return oauth.error_result(
+                "INVALID_TITLE",
+                "title must be a non-empty string.",
+                False,
+                "Provide a short, descriptive page title.",
+            )
+
+        title = title.strip()
+
+        if not isinstance(content, str) or not content.strip():
+            return oauth.error_result(
+                "INVALID_CONTENT",
+                "content must be a non-empty string.",
+                False,
+                "Provide the study-note text to write to the page.",
+            )
+
+        if type(dry_run) is not bool:
+            return oauth.error_result(
+                "INVALID_DRY_RUN",
+                "dry_run must be True or False.",
+                False,
+                "Use dry_run=True to preview, or omit it.",
+            )
+
+        if not dry_run:
+            return oauth.error_result(
+                "PAGE_CREATION_NOT_IMPLEMENTED",
+                "Live page creation is planned for Phase 2.4.2 and "
+                "is not implemented yet.",
+                False,
+                "Call create_page() with dry_run=True (the default) "
+                "to preview the page.",
+            )
+
+        return {
+            "ok": True,
+            "dry_run": True,
+            "created": False,
+            "preview": {
+                "parent_page_id": parent_page_id,
+                "title": title,
+                "content": content,
+            },
+        }

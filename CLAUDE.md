@@ -17,9 +17,11 @@ on the user's behalf.
   `verify_api_access()` (refresh-once-after-401 check against
   `/search`).
 - `notion_api.py` — `NotionAPIClient`, the shared HTTP layer:
-  - `request()`: sends authenticated calls to the Notion API, retries
-    exactly once after an HTTP 401 by refreshing cached tokens, and
-    turns all failure modes (network error, bad JSON, 403/404/429/5xx)
+  - `request()`: sends authenticated calls to the Notion API. On an
+    HTTP 401 it attempts exactly one token refresh; the original
+    request is retried only if that refresh succeeds, otherwise the
+    refresh's own error is returned immediately. It turns all failure
+    modes (network error, bad JSON, 403/404/429/5xx, a failed refresh)
     into a structured `{"error": {code, message, retryable,
     suggested_action}}` dict instead of raising.
   - `search_pages()`: calls `/search` with a page-object filter,
@@ -41,6 +43,12 @@ on the user's behalf.
   - `get_page_content(page_id, ...)`: combines `get_page()` and
     `read_page_blocks()` into one result (page metadata + body text +
     read status); short-circuits on a metadata error.
+  - `create_page(parent_page_id, title, content, *, dry_run=True)`:
+    Phase 2.4.1, local-only so far. With `dry_run=True` (the default),
+    validates inputs and returns a preview (`parent_page_id`, `title`,
+    `content`) with zero calls to `request()`. With `dry_run=False`,
+    returns a structured `PAGE_CREATION_NOT_IMPLEMENTED` error — live
+    creation is Phase 2.4.2.
 - `check_notion_api.py`, `check_search_pages.py`, `check_get_page.py`,
   `check_get_block_children.py`, `check_block_tree.py`,
   `check_read_page_blocks.py`, `check_get_page_content.py` — manual
@@ -62,6 +70,8 @@ on the user's behalf.
     and output-limit enforcement.
   - `test_get_page_content.py` — `get_page_content()` combining and
     short-circuit behavior.
+  - `test_create_page.py` — `create_page()` local-preview validation,
+    `dry_run` defaulting/branching, and multiline content preservation.
   - `test_protpcpl.py` — real MCP stdio protocol check (launches
     `server.py` as a subprocess, calls `tools/list` and `tools/call`).
   - `async_prac.py` — scratch file for practicing `asyncio`, unrelated
@@ -83,17 +93,21 @@ on the user's behalf.
 - Readable, bounded text extraction from page content
   (`read_page_blocks`).
 - Combined page metadata + body read (`get_page_content`).
+- Local preview for page creation (`create_page`, Phase 2.4.1):
+  `dry_run=True` (the default) validates and previews with zero
+  `request()` calls; `dry_run=False` returns a not-implemented error.
 
-Mocked tests exist and pass for all of the above (`pytest tests/` —
-59 passed as of 2026-11-22). Most of these also have a manual live
+Automated tests exist and pass for all of the above — mocked Notion
+API tests plus a real local MCP stdio protocol test (`pytest tests/`
+— 71 passed as of 2026-11-23). Most of these also have a manual live
 check script (`check_*.py`); see `PROJECT_CONTEXT.md` for which live
 checks have actually been run versus which are still pending.
 
 ### Planned, not implemented
 
-- Local preview and page creation (Phase 2.4), and a possible
-  title-update operation (keep only if it ends up implemented and
-  justified).
+- Live page creation (Phase 2.4.2) and reading the new page back
+  (Phase 2.4.3), and a possible title-update operation (keep only if
+  it ends up implemented and justified).
 - Exposing any Notion operation (search, read, write) as an actual
   `@mcp.tool()` in `server.py` — right now only `health` is exposed
   (Phase 3).
