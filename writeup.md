@@ -65,7 +65,7 @@ All operations use `NotionAPIClient.request()`. After an initial HTTP 401, it at
 
 ### Final Phase 2.3 acceptance check
 
-Four unit tests cover successful assembly and forwarding of limits, preservation of a partial read, a metadata error that skips the body, and a body error that reaches the caller unchanged. The results of the final suite and combined live check are pending in this record.
+Four unit tests cover successful assembly and forwarding of limits, preservation of a partial read, a metadata error that skips the body, and a body error that reaches the caller unchanged. The full mocked suite (`pytest tests/ -v`) was run on 2026-11-22: 59 passed. The combined live check (`check_get_page_content.py`) has not been run; its outcome remains pending in this record.
 
 ```bash
 python -m pytest tests/ -q
