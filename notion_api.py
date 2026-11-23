@@ -504,6 +504,8 @@ class NotionAPIClient:
         which is how read_page_blocks() enforces its own output
         limits without fetching the whole tree first and trimming it
         afterward.
+        
+        on_block 本身通常在 read_page_blocks() 里定义，用来检查这个 block 能不能加入输出，以及有没有达到 max_blocks 限制。
         """
         if not isinstance(page_id, str):
             return oauth.error_result(
@@ -924,6 +926,57 @@ class NotionAPIClient:
             "unsupported_block_types": sorted(
                 reader_state["unsupported_types"]
             ),
+        }
+
+    def get_page_content(
+        self,
+        page_id: str,
+        *,
+        max_depth: int = 3,
+        max_request_calls: int = 20,
+        max_blocks: int = 500,
+        max_characters: int = 20000,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        """Read a page's metadata and body text in one combined result.
+
+        Calls get_page(page_id) first. If that errors, the error is
+        returned immediately and read_page_blocks() is never called.
+        Otherwise calls read_page_blocks() with the same page_id,
+        forwarding max_depth, max_request_calls, max_blocks,
+        max_characters, and page_size unchanged. If the body reader
+        errors, that error is also returned unchanged.
+
+        On success, every field from read_page_blocks() -- complete,
+        blocks, request_calls, partial, warnings, and
+        unsupported_block_types -- is kept as-is, including
+        complete=False and any partial flags/warnings/unsupported
+        types for a partial read, and a "page" field (the shaped
+        {id, title, url} from get_page()) is added alongside them.
+        request_calls only counts get_block_children() calls made
+        while reading the body; the get_page() call itself is not
+        included.
+        """
+        page_result = self.get_page(page_id)
+
+        if "error" in page_result:
+            return page_result
+
+        body_result = self.read_page_blocks(
+            page_id,
+            max_depth=max_depth,
+            max_request_calls=max_request_calls,
+            max_blocks=max_blocks,
+            max_characters=max_characters,
+            page_size=page_size,
+        )
+
+        if "error" in body_result:
+            return body_result
+
+        return {
+            **body_result,
+            "page": page_result["page"],
         }
 
     def search_pages(
