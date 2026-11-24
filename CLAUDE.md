@@ -57,9 +57,13 @@ on the user's behalf.
     response. Live creation against the real workspace is Phase 2.4.3.
 - `check_notion_api.py`, `check_search_pages.py`, `check_get_page.py`,
   `check_get_block_children.py`, `check_block_tree.py`,
-  `check_read_page_blocks.py`, `check_get_page_content.py` — manual
-  scripts for exercising each layer above against the real Notion API
-  from the terminal. Not automated tests.
+  `check_read_page_blocks.py`, `check_get_page_content.py`,
+  `check_create_page_live.py` — manual scripts for exercising each
+  layer above against the real Notion API from the terminal. Not
+  automated tests. `check_create_page_live.py` (Phase 2.4.3) always
+  previews first; only with `--create` does it actually create a page
+  and read it back — not yet run against the real API (see
+  `PROJECT_CONTEXT.md`).
 - `tests/` — pytest suite, all mocked (no live network calls):
   - `test_oauth_refresh.py` — 401 → refresh → retry logic in
     `oauth.verify_api_access`.
@@ -118,8 +122,12 @@ checks have actually been run versus which are still pending.
 - A real, approved live call to `create_page(..., dry_run=False)`
   against the authorized workspace, followed by reading the new page
   back with `get_page_content()` to confirm the round-trip (Phase
-  2.4.3), and a possible title-update operation (keep only if it ends
-  up implemented and justified).
+  2.4.3). `check_create_page_live.py` is written and ready for this
+  (run `python check_create_page_live.py YOUR_PARENT_PAGE_ID` for a
+  preview only, or add `--create` for the live write + read-back) but
+  has not actually been run against the real API; its outcome is
+  pending until the user runs it. A possible title-update operation
+  remains undecided too (keep only if implemented and justified).
 - Exposing any Notion operation (search, read, write) as an actual
   `@mcp.tool()` in `server.py` — right now only `health` is exposed
   (Phase 3).

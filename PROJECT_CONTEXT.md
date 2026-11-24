@@ -43,13 +43,15 @@ pending for Phase 2.3; `create_page()` has no live check yet at all
   `check_get_page_content.py "YOUR_W2_TEST_PAGE_ID"` is the only
   remaining open item.
 
-**Next action.** Implement Phase 2.4.3: a real live call to
-`create_page(..., dry_run=False)` against the authorized workspace,
-followed by `get_page_content()` on the returned page ID to confirm
-the written title/body round-trips. Do not start this without the
-user's explicit request — the Learning Workflow rule in `CLAUDE.md`
-says to work in small, explicitly requested steps, and live writes
-need explicit approval.
+**Next action.** The user runs the live Phase 2.4.3 check themselves:
+`python check_create_page_live.py YOUR_PARENT_PAGE_ID` for a preview
+only, or with `--create` to actually create a page and read it back.
+This script exists and is syntax-checked but has **not** been run
+against the real API in any session recorded here — its outcome is
+pending until the user runs it and reports the result. Do not run it
+without the user's explicit request — the Learning Workflow rule in
+`CLAUDE.md` says to work in small, explicitly requested steps, and
+live writes need explicit approval.
 
 ---
 
@@ -68,7 +70,7 @@ need explicit approval.
 | 2.3.5 | Combined metadata + body (`get_page_content`) | Done |
 | 2.4.1 | Local preview for page creation (`create_page`, `dry_run`) | Done |
 | 2.4.2 | Page creation (`create_page`, `dry_run=False`, mocked only) | Done |
-| 2.4.3 | Live creation, then read the new page back | Planned |
+| 2.4.3 | Live creation, then read the new page back (`check_create_page_live.py`) | Script ready; live result pending |
 | (maybe) | Title-update operation | Planned, keep only if implemented and justified |
 | 3 | Register operations as `@mcp.tool()`s in `server.py` | Planned |
 | 4 | Tool schemas with parameter limits, workflow instructions, read-only annotations, write preview | Planned |
@@ -534,19 +536,68 @@ below are read from `notion_api.py`, `tests/test_get_page_content.py`,
     against the authorized workspace. That live call, followed by a
     `get_page_content()` read-back, is Phase 2.4.3.
 
-#### 2.4.3 — Live creation and read-back (planned, not started)
-*Reconstructed summary — decisions below come from a separate ChatGPT
-conversation's handoff notes, not from a prompt available in any
-session recorded here. Do not treat these as already implemented.*
+#### 2.4.3 — Live creation and read-back — script ready, live result pending
 
-- Create a real page live, with explicit approval, only after
-  reviewing the Phase 2.4.1 preview; return the new page's ID and URL.
-- Read the new page back with `get_page_content()` to confirm the
-  written title/body round-trips.
-- **Capability justification (from `writeup.md`).** `Read content` is
-  justified by search + read; `Insert content` by creation;
-  `Update content` only if a title-update operation ships. Reassess
-  the final Notion integration's capability set once 2.4 lands.
+- **Requested outcome.** Add `check_create_page_live.py`, reusing
+  `create_page()` and `get_page_content()`. CLI: positional
+  `parent_page_id`, optional `--create`. Use a clearly identifiable
+  test title and a short body with a blank line and an indented line;
+  identical inputs for preview and creation. Always preview first;
+  with no `--create`, exit after preview, and a preview error must
+  stop before any write. With `--create` and a successful preview,
+  call `create_page(dry_run=False)` exactly once and print the new
+  page's ID/URL immediately. Then call `get_page_content()`, require
+  `complete=True`, and compare the returned title and paragraph texts
+  against the original inputs (blank line and indentation included).
+  On any creation or read-back failure, print an actionable English
+  message and exit nonzero, and never retry by creating another page.
+  Run offline checks only; leave the live result pending until the
+  user runs it themselves.
+- **Decisions and reasons.**
+  - The preview and creation calls use byte-for-byte identical
+    `TEST_TITLE`/`TEST_CONTENT` constants — reason: the preview is
+    only a meaningful rehearsal of what creation will do if both use
+    the same inputs; a mismatch would make a passing preview mean
+    nothing about the live call that follows it.
+  - The test title is `"W2 MCP Live Check -- Phase 2.4.3 (safe to
+    delete)"` — reason: a stray or repeated run must be trivially
+    recognizable and safe to clean up by hand in Notion.
+  - The body is `"<line>\n\n    <indented line>"` (one content line,
+    one blank line, one indented line) — reason: this exercises the
+    same blank-line-becomes-empty-paragraph and indentation-preserved
+    behavior that Phase 2.4.2's `children` construction promises,
+    with the smallest body that can demonstrate both at once.
+  - On a creation failure, the script prints the error and an
+    explicit instruction not to retry by creating another page, since
+    `request()`'s own error already carries the correct
+    `retryable`/`suggested_action` for that failure mode. On a
+    read-back failure (error, `complete=False`, or a title/paragraph
+    mismatch), the script instead tells the caller to inspect the
+    *already-created* page manually and **still never retries by
+    creating another page** — reason: by that point the write may
+    have already succeeded, so a second `create_page()` call risks a
+    duplicate page rather than fixing anything.
+  - Paragraph comparison is done against `TEST_CONTENT.split("\n")`,
+    matching exactly how `create_page()` itself turns `content` into
+    one paragraph block per line — reason: this is the same splitting
+    rule Phase 2.4.2 uses to build `children`, so the comparison
+    checks the real round-trip rather than a re-derived approximation
+    of it.
+- **Files/functions.** `check_create_page_live.py` (new), reusing
+  `NotionAPIClient.create_page()` and `NotionAPIClient.get_page_content()`
+  unchanged.
+- **Verification.**
+  - **Offline checks run:** `python -m py_compile
+    check_create_page_live.py` (syntax only, no network, no
+    credentials read) — passed. `python -m pytest tests/ -v` (full
+    suite, unaffected by this change since no production code was
+    touched) — **77 passed**, both on 2026-11-23.
+  - **Live check:** **pending.** Neither preview nor `--create` mode
+    has been run against the real Notion API in any session recorded
+    here. The user will run
+    `python check_create_page_live.py YOUR_PARENT_PAGE_ID` (preview)
+    and/or `... --create` (live write + read-back) themselves and
+    report the actual result.
 
 ### Phase 3 and later (planned, not started)
 
@@ -1025,3 +1076,56 @@ evidence exists.
   dry_run=False)` call, followed by `get_page_content()` on the
   result to confirm the round-trip) is still planned, not started.
   MCP registration remains Phase 3.
+
+### Prepare Phase 2.4.3 (2026-11-23)
+> "Prepare Phase 2.4.3: a live create-and-read-back check. Read
+> CLAUDE.md and the "Resume here" section of PROJECT_CONTEXT.md first.
+>
+> Add check_create_page_live.py alongside the existing offline
+> checker. Reuse NotionAPIClient.create_page() and
+> get_page_content().
+>
+> The CLI should accept a positional parent_page_id and an optional
+> --create flag. Use a clearly identifiable test title and a short
+> body containing a blank line and an indented line. Keep the example
+> inputs identical between preview and creation.
+>
+> 1. Always show the local preview first. With no --create flag, exit
+>    after preview. A preview error must stop the script before any
+>    write.
+> 2. With --create and a successful preview, call create_page() once
+>    with dry_run=False. Print the returned new page ID and URL
+>    immediately.
+> 3. Read that new page using get_page_content(). Require a complete
+>    read. Compare the returned title and the paragraph texts against
+>    the original inputs, preserving blank lines and indentation.
+> 4. If creation or read-back fails, print an actionable English
+>    message and exit with a nonzero status. Never retry by creating
+>    another page.
+> 5. Run offline checks only. Report the commands actually run and
+>    leave the live result pending in PROJECT_CONTEXT.md until I run
+>    it myself."
+
+- **Phase.** 2.4.3 (preparation only; the live check itself is not
+  run in this entry).
+- **Requested outcome / acceptance criteria.** See the quoted
+  instruction above; full detail is in the Phase 2.4.3 history section
+  above.
+- **Files/functions changed.** `check_create_page_live.py` added (new
+  file; no changes to `notion_api.py` or any existing test). `CLAUDE.md`:
+  architecture's `check_*.py` list and the "Planned, not implemented"
+  section updated to mention the new script and its pending status.
+- **Decisions and reasons.** See Phase 2.4.3 above (identical
+  preview/creation inputs; a clearly-deletable test title; a body
+  exercising both a blank line and an indented line; never retrying
+  by creating a second page on any failure, including after the page
+  already exists).
+- **Commands actually run and results observed.** `python -m
+  py_compile check_create_page_live.py` → passed (syntax only, no
+  network, no credentials read). `python -m pytest tests/ -v` → 77
+  passed (full suite, unchanged, since no production code was
+  touched). No live Notion call was made; no commit was made.
+- **What remains.** The live result is **pending**: the user runs
+  `python check_create_page_live.py YOUR_PARENT_PAGE_ID` (preview) and,
+  when ready, `... --create` (live write + read-back) themselves and
+  reports the actual outcome before Phase 2.4.3 can be marked Done.
