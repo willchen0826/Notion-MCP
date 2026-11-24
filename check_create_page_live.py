@@ -1,55 +1,127 @@
 import argparse
 import json
+from uuid import UUID
 
 from notion_api import NotionAPIClient
 
 
-# Clearly identifiable so a stray run is easy to recognize and delete
-# in Notion. The exact same title/content are used for the preview
-# and, with --create, for the real write -- the preview is only
-# meaningful as a rehearsal of this phase's actual check if both use
-# identical inputs.
-TEST_TITLE = "W2 MCP Live Check -- Phase 2.4.3 (safe to delete)"
-TEST_CONTENT = (
-    "This page was created by check_create_page_live.py (Phase 2.4.3).\n"
-    "\n"
-    "    This line is indented to check whitespace preservation."
-)
+# Fixed so the preview and the live write always agree. The body has
+# exactly three lines when split on "\n": a sentence, a blank line,
+# and an indented line -- used below to check that get_page_content()
+# reads back the same three paragraphs, blank line and indentation
+# included.
+TITLE = "W2 MCP round-trip check"
+CONTENT = "Review OAuth.\n\n    Check token refresh."
+
+
+def _verify_read_back(client, page_id, expected_title, expected_paragraphs):
+    """Read page_id back and check it matches what was sent.
+
+    Used both right after a live create_page() call and, via
+    --verify-id, to retry only this read without creating another
+    page.
+    """
+    print(f"INFO: Reading back page_id={page_id} with get_page_content()")
+    read_back = client.get_page_content(page_id)
+
+    if "error" in read_back:
+        print("FAIL: Could not read the page back.")
+        print(json.dumps(read_back["error"], indent=2, ensure_ascii=False))
+        return False
+
+    try:
+        id_matches = UUID(read_back["page"]["id"]) == UUID(page_id)
+    except (KeyError, TypeError, ValueError):
+        id_matches = False
+
+    actual_paragraphs = [block["text"] for block in read_back["blocks"]]
+
+    checks = {
+        "Read is complete": read_back["complete"] is True,
+        "Returned page ID matches": id_matches,
+        "Title matches": read_back["page"]["title"] == expected_title,
+        "Exactly three top-level paragraphs": (
+            len(actual_paragraphs) == 3
+        ),
+        "Paragraph texts match (blank line and indentation preserved)": (
+            actual_paragraphs == expected_paragraphs
+        ),
+    }
+
+    for description, passed in checks.items():
+        label = "PASS" if passed else "FAIL"
+        print(f"{label}: {description}")
+
+    if not all(checks.values()):
+        print(f"INFO: Expected paragraphs: {expected_paragraphs!r}")
+        print(f"INFO: Actual paragraphs: {actual_paragraphs!r}")
+        if not read_back.get("complete"):
+            print(
+                json.dumps(
+                    read_back.get("partial"), indent=2, ensure_ascii=False
+                )
+            )
+        return False
+
+    print("PASS: Read-back matched the original inputs.")
+    return True
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Preview a child page, and optionally create it live and "
-            "read it back, to check Phase 2.4.3 (create_page() + "
+            "Preview, and optionally create and read back, a live "
+            "Notion child page to check Phase 2.4.3 (create_page() + "
             "get_page_content())."
         )
     )
     parser.add_argument("parent_page_id", help="Existing parent page ID")
-    parser.add_argument(
+
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--create",
         action="store_true",
         help=(
-            "Actually create the page and read it back. Without this "
-            "flag, only the local preview is shown and nothing is "
-            "written to Notion."
+            "After a successful preview, actually create the page and "
+            "read it back. Without this flag (and without --verify-id), "
+            "only the local preview is shown and nothing is written to "
+            "Notion."
         ),
     )
-    args = parser.parse_args()
+    mode.add_argument(
+        "--verify-id",
+        metavar="NEW_PAGE_ID",
+        default=None,
+        help=(
+            "Skip preview and creation; only read back an already-"
+            "created page by ID. Use this to retry a failed read-back "
+            "without creating another page."
+        ),
+    )
 
+    args = parser.parse_args()
     client = NotionAPIClient()
+    expected_paragraphs = CONTENT.split("\n")
+
+    if args.verify_id:
+        print(f"INFO: Verifying existing page_id={args.verify_id}")
+        ok = _verify_read_back(
+            client, args.verify_id, TITLE, expected_paragraphs
+        )
+        return 0 if ok else 1
 
     print("INFO: Calling create_page() with dry_run=True (preview)")
     preview = client.create_page(
-        args.parent_page_id,
-        TEST_TITLE,
-        TEST_CONTENT,
-        dry_run=True,
+        args.parent_page_id, TITLE, CONTENT, dry_run=True
     )
+    print(f"INFO: parent_page_id={args.parent_page_id!r}")
+    print(f"INFO: title={TITLE!r}")
+    print(f"INFO: body={CONTENT!r}")
     print(json.dumps(preview, indent=2, ensure_ascii=False))
 
     if "error" in preview:
-        print("FAIL: Preview failed. Stopping before any write.")
+        print("FAIL: Preview failed.")
+        print(json.dumps(preview["error"], indent=2, ensure_ascii=False))
         return 1
 
     print("PASS: Preview succeeded.")
@@ -60,10 +132,7 @@ def main() -> int:
 
     print("INFO: Calling create_page() with dry_run=False (live write)")
     created = client.create_page(
-        args.parent_page_id,
-        TEST_TITLE,
-        TEST_CONTENT,
-        dry_run=False,
+        args.parent_page_id, TITLE, CONTENT, dry_run=False
     )
 
     if "error" in created:
@@ -77,59 +146,19 @@ def main() -> int:
         return 1
 
     new_page = created["page"]
-    print(f"PASS: Page created. id={new_page['id']}")
+    new_page_id = new_page["id"]
+    print(f"PASS: Page created. id={new_page_id}")
     print(f"PASS: New page URL: {new_page['url']}")
 
-    print("INFO: Reading the new page back with get_page_content()")
-    read_back = client.get_page_content(new_page["id"])
+    ok = _verify_read_back(client, new_page_id, TITLE, expected_paragraphs)
 
-    if "error" in read_back:
-        print("FAIL: Could not read the new page back.")
-        print(json.dumps(read_back["error"], indent=2, ensure_ascii=False))
+    if not ok:
         print(
-            f"ACTION: The page was created (id={new_page['id']}, "
-            f"url={new_page['url']}) but could not be read back. "
-            "Inspect it manually in Notion. Do not create another page."
-        )
-        return 1
-
-    if not read_back["complete"]:
-        print("FAIL: Read-back was incomplete (complete=False).")
-        print(
-            json.dumps(read_back["partial"], indent=2, ensure_ascii=False)
-        )
-        print(
-            f"ACTION: The page was created (id={new_page['id']}, "
-            f"url={new_page['url']}) but the body read did not finish. "
-            "Inspect it manually. Do not create another page."
-        )
-        return 1
-
-    expected_paragraphs = TEST_CONTENT.split("\n")
-    actual_paragraphs = [block["text"] for block in read_back["blocks"]]
-
-    checks = {
-        "Title matches": read_back["page"]["title"] == TEST_TITLE,
-        "Paragraph count matches": (
-            len(actual_paragraphs) == len(expected_paragraphs)
-        ),
-        "Paragraph texts match, including the blank and indented line": (
-            actual_paragraphs == expected_paragraphs
-        ),
-    }
-
-    for description, passed in checks.items():
-        label = "PASS" if passed else "FAIL"
-        print(f"{label}: {description}")
-
-    if not all(checks.values()):
-        print(f"INFO: Expected paragraphs: {expected_paragraphs}")
-        print(f"INFO: Actual paragraphs: {actual_paragraphs}")
-        print(
-            f"ACTION: The page was created (id={new_page['id']}, "
-            f"url={new_page['url']}) but its content did not match "
-            "what was sent. Inspect it manually. Do not create another "
-            "page."
+            f"ACTION: The page was created (id={new_page_id}, "
+            f"url={new_page['url']}) but the read-back above failed. "
+            "Retry only the read with: python check_create_page_live.py "
+            f"{args.parent_page_id} --verify-id {new_page_id}. Do not "
+            "create another page."
         )
         return 1
 

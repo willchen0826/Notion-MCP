@@ -61,9 +61,13 @@ on the user's behalf.
   `check_create_page_live.py` — manual scripts for exercising each
   layer above against the real Notion API from the terminal. Not
   automated tests. `check_create_page_live.py` (Phase 2.4.3) always
-  previews first; only with `--create` does it actually create a page
-  and read it back — not yet run against the real API (see
-  `PROJECT_CONTEXT.md`).
+  previews first with fixed test inputs; `--create` actually creates
+  the page and reads it back; `--verify-id NEW_PAGE_ID` (mutually
+  exclusive with `--create`) retries only the read-back for a page
+  that already exists, without ever creating another one — not yet
+  run against the real API (see `PROJECT_CONTEXT.md`).
+  `check_create_page.py` is the separate, fully mocked offline check
+  for the same method (no network calls).
 - `tests/` — pytest suite, all mocked (no live network calls):
   - `test_oauth_refresh.py` — 401 → refresh → retry logic in
     `oauth.verify_api_access`.
